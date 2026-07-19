@@ -23,9 +23,10 @@ see `src/cli/progress.ts`.
 `npm run cli -- close <leadId> <won|lost|canceled>` is the human action that records a
 closed deal (see "Why there's no `close_deal` tool" below).
 `npm run cli -- retry <leadId>` is the human action that un-parks a lead stuck on an escalation
-(see "Human-in-the-loop" below). `npm run cli -- escalated` lists only leads currently parked on a
-genuine escalation (the ones `retry` would actually do something for) — same filtering relationship
-`proposals` has to `dashboard`.
+(see "Human-in-the-loop" below). `npm run cli -- escalated` lists every lead `dashboard`'s
+`Escalated` column flags — both leads genuinely parked (needing `retry`) and ones that just hit a
+self-healing rate-limit escalation — with a `Status` column distinguishing the two, plus the reason
+and timestamp `dashboard` doesn't have room for.
 
 Other scripts:
 

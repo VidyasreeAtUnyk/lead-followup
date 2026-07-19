@@ -241,3 +241,18 @@ it audits it via the tool call -- the same principle just applied to do_not_cont
 now-unused `leadContextHint`/`segmentGuidance` functions rather than leaving them as unreferenced
 cruft. A reminder that a documented design decision and the actual code are two different claims --
 worth spot-checking that a described behavior is still wired in, not just described.
+
+## Entry 16 — cli escalated command, then a definition mismatch with dashboard
+
+Asked for a command to see escalated leads. Added `cli escalated`, scoped to only "parked" leads
+(the ones `retry` acts on), reasoning that's what's actionable. Immediately reported back as
+inconsistent: `dashboard` showed 2 leads with something in its `Escalated` column, but `cli
+escalated` said none. Verified directly rather than assuming -- both of those leads were
+`transient` (rate-limit) status, correctly excluded by the "parked only" filter. So the
+classification logic wasn't wrong, but the *naming* was: a column literally titled "Escalated"
+showing a lead, and a command literally named `escalated` not showing that same lead, is a
+real inconsistency regardless of whether each piece is individually "correct." Fixed by widening
+`cli escalated` to the same predicate as the dashboard column (`status !== "none"`), adding a
+`Status` column so `parked` and `transient` are still visually distinct within the list. Two
+commands sharing a name should share a definition, even when the narrower one seemed more useful
+in isolation.

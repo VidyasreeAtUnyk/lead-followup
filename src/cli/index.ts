@@ -81,12 +81,17 @@ program
 
 program
   .command("escalated")
-  .description("Show leads currently parked on a genuine escalation (needs `cli retry <leadId>`)")
+  .description("Show every lead the dashboard's Escalated column flags -- both needing a human retry and self-healing rate-limit hits")
   .action(() => {
     const database = db();
-    const parked = listLeads(database).filter((lead) => getEscalationStatus(database, lead.id) === "parked");
-    const table = new Table({ head: ["ID", "Name", "Segment", "Stage", "Reason", "Escalated At"] });
-    for (const lead of parked) {
+    // Same predicate as dashboard's "Escalated" column (status !== "none") --
+    // this command must show a superset consistent with that column, or the
+    // two disagree on what "escalated" means for the exact same lead.
+    const escalated = listLeads(database)
+      .map((lead) => ({ lead, status: getEscalationStatus(database, lead.id) }))
+      .filter(({ status }) => status !== "none");
+    const table = new Table({ head: ["ID", "Name", "Segment", "Stage", "Status", "Reason", "Escalated At"] });
+    for (const { lead, status } of escalated) {
       const audit = listAudit(database, lead.id);
       const lastRow = audit[audit.length - 1];
       let reason = "";
@@ -100,13 +105,14 @@ program
         lead.name,
         lead.segment,
         colorStage(lead.stage, Boolean(lead.do_not_contact)),
+        formatEscalationStatus(status),
         truncate(reason, 60),
         formatTimestamp(lastRow.timestamp),
       ]);
     }
     console.log(table.toString());
-    if (parked.length === 0) {
-      console.log(chalk.dim("No leads are currently parked on an escalation."));
+    if (escalated.length === 0) {
+      console.log(chalk.dim("No leads are currently escalated."));
     }
   });
 
