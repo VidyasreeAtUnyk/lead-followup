@@ -195,33 +195,46 @@ export function listPriceHistory(db: DatabaseSync, propertyId: number): Property
   );
 }
 
+export type EscalationStatus =
+  | "none" // most recent action wasn't an escalation at all
+  | "transient" // most recent action was a system_triggered (infra) escalation -- self-heals next pass
+  | "parked"; // most recent action was a genuine model-decided escalation -- needs a human `retry`
+
 /**
- * True once the most recent audit_log entry for this lead is a successful,
- * model-decided escalate_to_agent call -- used to keep the queue from
- * re-escalating the same lead every run. A human action (approve/reject/
- * retry) or a fresh tool call writes a newer audit row and un-parks it.
- *
- * Escalations the agent loop triggers itself as a safety net (the LLM call
- * failed, the model stopped calling tools, the turn budget ran out) are
- * marked `system_triggered` and do NOT park the lead -- those aren't a
- * judgment call about the lead, they're an infrastructure hiccup, so the
- * lead should simply be picked up again on the next process pass rather
- * than sitting stuck until a human explicitly retries it.
+ * Reads the single most recent audit_log row for a lead and classifies it.
+ * "none" and "transient" both mean the queue will pick this lead up again
+ * on the next pass without anyone doing anything -- the distinction exists
+ * purely so a human looking at the dashboard can tell "nothing has happened"
+ * apart from "something just failed, but it'll retry itself" instead of both
+ * reading as identical blanks.
  */
-export function isParkedOnEscalation(db: DatabaseSync, leadId: number): boolean {
+export function getEscalationStatus(db: DatabaseSync, leadId: number): EscalationStatus {
   const row = normalizeRow<{ tool_name: string; output_json: string } | undefined>(
     db
       .prepare("SELECT tool_name, output_json FROM audit_log WHERE lead_id = $lead_id ORDER BY id DESC LIMIT 1")
       .get(bind({ $lead_id: leadId }))
   );
-  if (!row) return false;
-  if (row.tool_name !== "escalate_to_agent") return false;
+  if (!row || row.tool_name !== "escalate_to_agent") return "none";
   try {
     const output = JSON.parse(row.output_json) as { escalated?: boolean; system_triggered?: boolean };
-    return Boolean(output.escalated) && !output.system_triggered;
+    if (!output.escalated) return "none";
+    return output.system_triggered ? "transient" : "parked";
   } catch {
-    return false;
+    return "none";
   }
+}
+
+/**
+ * True only for a genuine, model-decided escalation -- used to keep the
+ * queue from re-escalating the same lead every run. A human action
+ * (approve/reject/retry) or a fresh tool call writes a newer audit row and
+ * un-parks it. A `system_triggered` escalation (the agent loop's own safety
+ * net -- the LLM call failed, the model stopped calling tools, the turn
+ * budget ran out) never parks: that's an infrastructure hiccup, not a
+ * judgment call about the lead, so it's simply retried on the next pass.
+ */
+export function isParkedOnEscalation(db: DatabaseSync, leadId: number): boolean {
+  return getEscalationStatus(db, leadId) === "parked";
 }
 
 export function insertRunMetric(

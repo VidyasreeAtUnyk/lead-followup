@@ -15,6 +15,7 @@ import {
   updateProposal,
   insertAudit,
   isParkedOnEscalation,
+  getEscalationStatus,
 } from "../db/queries.js";
 import { colorStage, truncate, formatTimestamp } from "./format.js";
 import { RunProgressRenderer } from "./progress.js";
@@ -41,7 +42,6 @@ program
     });
     for (const lead of leads) {
       const pending = listProposals(database, { lead_id: lead.id, status: "pending" }).length;
-      const parked = isParkedOnEscalation(database, lead.id);
       table.push([
         lead.id,
         lead.name,
@@ -49,11 +49,17 @@ program
         colorStage(lead.stage, Boolean(lead.do_not_contact)),
         formatTimestamp(lead.last_contacted_at),
         pending > 0 ? chalk.bold(String(pending)) : "0",
-        parked ? chalk.red("yes -- needs retry") : chalk.dim("no"),
+        formatEscalationStatus(getEscalationStatus(database, lead.id)),
       ]);
     }
     console.log(table.toString());
   });
+
+function formatEscalationStatus(status: ReturnType<typeof getEscalationStatus>): string {
+  if (status === "parked") return chalk.red("needs retry");
+  if (status === "transient") return chalk.yellow("rate-limited, retrying");
+  return chalk.dim("--");
+}
 
 program
   .command("proposals")
