@@ -11,6 +11,7 @@ import { colorStage, truncate, formatTimestamp } from "./format.js";
 import { processQueue } from "../agent/runQueue.js";
 import { closeDeal, type DealOutcome } from "../domain/dealClose.js";
 import { isToolError } from "../domain/errors.js";
+import { computeAggregateMetrics } from "../domain/metrics.js";
 
 const program = new Command();
 program.name("lead-followup").description("Real estate lead follow-up agent CLI");
@@ -172,5 +173,32 @@ program
       }
     }
   });
+
+program
+  .command("metrics")
+  .description("Show aggregate run metrics (escalation rate, tool calls, estimated cost, approval turnaround)")
+  .action(() => {
+    const database = db();
+    const m = computeAggregateMetrics(database);
+    const table = new Table();
+    table.push(
+      { "Total runs": String(m.totalRuns) },
+      { "Escalation rate": `${(m.escalationRate * 100).toFixed(1)}%` },
+      { "Avg tool calls / run": m.avgToolCallsPerRun.toFixed(1) },
+      { "Total estimated cost": `$${m.totalEstimatedCost.toFixed(4)}` },
+      {
+        "Avg approval turnaround": m.avgApprovalTurnaroundMs === null ? chalk.dim("n/a (no resolved proposals yet)") : formatDuration(m.avgApprovalTurnaroundMs),
+      }
+    );
+    console.log(table.toString());
+  });
+
+function formatDuration(ms: number): string {
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const minutes = seconds / 60;
+  if (minutes < 60) return `${minutes.toFixed(1)}m`;
+  return `${(minutes / 60).toFixed(1)}h`;
+}
 
 program.parseAsync(process.argv);
