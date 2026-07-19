@@ -15,6 +15,7 @@
     "process": "tsx src/agent/runQueue.ts",
     "demo:resume": "tsx src/agent/demoResume.ts",
     "evals": "tsx src/evals/run.ts",
+    "test": "tsx src/tests/run.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

@@ -7,14 +7,37 @@ interface MarketDataOutput {
   trend?: { percent_change_over_window?: number | null; projected_next_year_price?: number | null };
 }
 
+/**
+ * Normalizes a single money token -- with or without a leading '$', with or
+ * without thousands commas, with an optional k/K (thousand) or m/M (million)
+ * suffix -- into a plain number. Exported standalone so it can be unit
+ * tested directly against exact strings, independent of the prose regex
+ * that finds these tokens inside a full draft.
+ */
+export function parseMoneyToken(raw: string): number {
+  const stripped = raw.trim().replace(/^\$/, "").replace(/,/g, "");
+  const suffixMatch = stripped.match(/^(-?[\d.]+)\s*([kKmM])$/);
+  if (suffixMatch) {
+    const value = Number(suffixMatch[1]);
+    const multiplier = /[kK]/.test(suffixMatch[2]) ? 1_000 : 1_000_000;
+    return Math.round(value * multiplier);
+  }
+  return Number(stripped);
+}
+
 function extractDollarFigures(text: string): number[] {
-  const matches = text.match(/\$\s?[\d,]+(?:\.\d+)?/g) ?? [];
-  return matches.map((m) => Number(m.replace(/[$,\s]/g, "")));
+  const matches = text.match(/\$\s?[\d,]+(?:\.\d+)?\s?(?:[kKmM](?![a-zA-Z]))?/g) ?? [];
+  return matches.map((m) => parseMoneyToken(m));
+}
+
+/** Normalizes a single percent token (e.g. "12%", "-3.5 %") into a plain number. */
+export function parsePercentToken(raw: string): number {
+  return Number(raw.trim().replace(/[%\s]/g, ""));
 }
 
 function extractPercentFigures(text: string): number[] {
   const matches = text.match(/-?\d+(?:\.\d+)?\s?%/g) ?? [];
-  return matches.map((m) => Number(m.replace(/[%\s]/g, "")));
+  return matches.map((m) => parsePercentToken(m));
 }
 
 function approxEquals(a: number, b: number, tolerance: number): boolean {
