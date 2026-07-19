@@ -80,6 +80,37 @@ program
   });
 
 program
+  .command("escalated")
+  .description("Show leads currently parked on a genuine escalation (needs `cli retry <leadId>`)")
+  .action(() => {
+    const database = db();
+    const parked = listLeads(database).filter((lead) => getEscalationStatus(database, lead.id) === "parked");
+    const table = new Table({ head: ["ID", "Name", "Segment", "Stage", "Reason", "Escalated At"] });
+    for (const lead of parked) {
+      const audit = listAudit(database, lead.id);
+      const lastRow = audit[audit.length - 1];
+      let reason = "";
+      try {
+        reason = (JSON.parse(lastRow.output_json) as { reason?: string }).reason ?? "";
+      } catch {
+        reason = "";
+      }
+      table.push([
+        lead.id,
+        lead.name,
+        lead.segment,
+        colorStage(lead.stage, Boolean(lead.do_not_contact)),
+        truncate(reason, 60),
+        formatTimestamp(lastRow.timestamp),
+      ]);
+    }
+    console.log(table.toString());
+    if (parked.length === 0) {
+      console.log(chalk.dim("No leads are currently parked on an escalation."));
+    }
+  });
+
+program
   .command("history <leadId>")
   .description("Print the full chronological audit trail for a lead")
   .action((leadIdArg: string) => {
