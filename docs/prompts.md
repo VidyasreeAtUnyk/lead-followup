@@ -172,7 +172,9 @@ but deliberately absent from the JSON schema exposed to the model in `openaiTool
 has no way to set it. The three safety-net call sites in `loop.ts` (LLM call failed, no tool call
 returned, turn budget exceeded) now pass `system_triggered: true`; `isParkedOnEscalation` only parks
 on an escalation where that flag is absent, i.e. one the model itself chose to make. A rate-limited
-run now self-heals on the next `process` pass with no human action needed. For the cases that
+lead is simply no longer excluded from the queue, so the next time someone runs `process` (no
+scheduler or background retry -- that still requires a person or script to invoke it) it's attempted
+like any other lead, with no special unblocking step first. For the cases that
 should still require a person (a genuine business escalation), added `cli retry <leadId>` -- a
 human action, audited like approve/reject, that simply writes a new audit row so the lead falls out
 of the park automatically (parking is derived purely from "what's the most recent audit_log row,"
@@ -191,3 +193,23 @@ cases in `retry.test.ts` for the fail-fast/still-retries-short-waits behavior), 
 against the actual parked lead from the session: `cli retry 1` un-parked it, `cli process 1` hit the
 same still-exhausted daily quota but failed fast (~2.5s, consistent with one rejected request and no
 wasted retries) and correctly did not re-park the lead this time.
+
+## Entry 14 — Dashboard indicator was misleading, twice
+
+Asked to explain why the dashboard still showed a lead's stage as `new` and "Escalated: no" right
+after `cli process` had just printed `escalated`. Both were correct but the second one exposed a
+real bug: the initial "Escalated" column collapsed "nothing has happened" and "the last run just
+failed on a rate limit but isn't blocked" into the same `no`, which read as "nothing happened" right
+after the user watched it escalate. Fixed by replacing the boolean with a three-state
+`getEscalationStatus` ("none" / "transient" / "parked") so the dashboard can say `rate-limited,
+retrying` distinctly from a lead that was never touched.
+
+That label was then challenged directly: "is it really trying?" It wasn't -- "retrying" implied an
+ongoing background process, but nothing runs on a schedule or daemon; the fail-fast logic from Entry
+13 means zero retries happened within that failed call, and nothing will attempt the lead again
+until a person (or script) explicitly runs `cli process` a second time. Relabeled to `rate-limited --
+rerun process` and corrected the same overclaim ("retried automatically") everywhere it appeared --
+README, this file, and the code comments in `queries.ts` -- to say plainly that the lead is merely
+*not excluded* from the queue, not that anything is actively retrying it. Worth remembering as a
+pattern: "automatically" and "self-heals" are easy words to reach for when describing a passive
+"not blocked" state, and both overclaim unless something genuinely runs without being invoked.

@@ -57,7 +57,10 @@ program
 
 function formatEscalationStatus(status: ReturnType<typeof getEscalationStatus>): string {
   if (status === "parked") return chalk.red("needs retry");
-  if (status === "transient") return chalk.yellow("rate-limited, retrying");
+  // Nothing is retrying this in the background -- no daemon, no cron. It's
+  // simply not blocked, so the *next time a person runs `process`* it will
+  // be attempted again. Say that plainly rather than implying autonomous action.
+  if (status === "transient") return chalk.yellow("rate-limited -- rerun process");
   return chalk.dim("--");
 }
 

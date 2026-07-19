@@ -195,8 +195,12 @@ an internal-only `system_triggered` flag — part of the tool's contract but del
 the JSON schema exposed to the model in `openaiTools.ts`, so the model has no way to set it. The
 three safety-net escalations the loop itself triggers (the LLM call failed, the model stopped
 calling tools, the turn budget ran out) pass `system_triggered: true`, and those do **not** park the
-lead — an infrastructure hiccup isn't a judgment call about the lead, so it's simply retried
-automatically on the next `process` pass. For the escalations that *should* still wait on a person,
+lead — an infrastructure hiccup isn't a judgment call about the lead, so no special unblocking step
+is required. Nothing retries it in the background on its own, though — there's no scheduler or
+daemon; it just means whenever someone next runs `cli process`, that lead isn't excluded, unlike a
+genuinely parked one which would be skipped until a human clears it. The dashboard reflects this
+distinction directly (`rate-limited -- rerun process` vs. `needs retry`). For the escalations that
+*should* still wait on a person,
 `cli retry <leadId>` is the explicit human action that clears the park — logged like approve/reject,
 it just writes a new audited row, which is enough to un-park the lead since parking is derived
 purely from "what's the most recent `audit_log` row for this lead."

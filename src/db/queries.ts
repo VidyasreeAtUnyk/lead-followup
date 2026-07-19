@@ -197,15 +197,17 @@ export function listPriceHistory(db: DatabaseSync, propertyId: number): Property
 
 export type EscalationStatus =
   | "none" // most recent action wasn't an escalation at all
-  | "transient" // most recent action was a system_triggered (infra) escalation -- self-heals next pass
+  | "transient" // most recent action was a system_triggered (infra) escalation -- not blocked from the queue
   | "parked"; // most recent action was a genuine model-decided escalation -- needs a human `retry`
 
 /**
  * Reads the single most recent audit_log row for a lead and classifies it.
- * "none" and "transient" both mean the queue will pick this lead up again
- * on the next pass without anyone doing anything -- the distinction exists
- * purely so a human looking at the dashboard can tell "nothing has happened"
- * apart from "something just failed, but it'll retry itself" instead of both
+ * "none" and "transient" both mean the lead is NOT excluded from the queue --
+ * nothing runs in the background on its own (no daemon, no scheduler), but
+ * whenever someone next runs `process`, this lead will be attempted like any
+ * other, no special unblocking step required. The distinction from "parked"
+ * exists purely so a human looking at the dashboard can tell "nothing has
+ * happened" apart from "the last attempt just failed" instead of both
  * reading as identical blanks.
  */
 export function getEscalationStatus(db: DatabaseSync, leadId: number): EscalationStatus {
