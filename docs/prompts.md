@@ -213,3 +213,31 @@ README, this file, and the code comments in `queries.ts` -- to say plainly that 
 *not excluded* from the queue, not that anything is actively retrying it. Worth remembering as a
 pattern: "automatically" and "self-heals" are easy words to reach for when describing a passive
 "not blocked" state, and both overclaim unless something genuinely runs without being invoked.
+
+## Entry 15 — do_not_contact priority ordering, and a real dead-code bug found while checking it
+
+Asked whether processing the do-not-contact lead (Bob) actually said so, and whether that hard rule
+should be checked "first." Investigation showed the specific escalation in question was, again, the
+rate-limit safety net (`system_triggered: true`, LLM call failed before the model ever saw the
+lead) -- not a real do_not_contact decision at all, so there was nothing to fix in that particular
+run. But the underlying design question was worth answering properly: should do_not_contact be
+checked in code before the model is even invoked? Decided against a code-level bypass -- eval
+scenario 2 and the take-home's #1 priority both specifically test that *the agent* recognizes
+do_not_contact and escalates; skipping the model entirely would replace exactly the thing being
+graded with a hardcoded guard clause. Instead tightened the prompt (`prompts.ts`) to make
+do_not_contact the model's explicit first priority right after get_lead_context, above inspecting
+proposals or calling any other tool -- keeps the model genuinely deciding, just efficiently.
+
+Checking prompts.ts surfaced something more serious: `buildSystemPrompt()` took no arguments and
+never referenced segment at all. The `segmentGuidance`/`leadContextHint` functions that were
+supposed to shape drafting tone per segment (documented in the README as a core design decision
+since early in the build) were dead code -- defined, never called from loop.ts. The correct-looking
+upgrade-pitch behavior observed earlier for the client-segment lead was the model inferring it from
+raw `get_lead_context`/`find_matching_properties` data, not from any actual prompt instruction.
+Fixed by folding both segment branches into the static system prompt as conditional guidance the
+model resolves once it sees `segment` in get_lead_context's real output, rather than passing segment
+into buildSystemPrompt ahead of time (which would mean telling the model a lead-specific fact before
+it audits it via the tool call -- the same principle just applied to do_not_contact). Removed the
+now-unused `leadContextHint`/`segmentGuidance` functions rather than leaving them as unreferenced
+cruft. A reminder that a documented design decision and the actual code are two different claims --
+worth spot-checking that a described behavior is still wired in, not just described.

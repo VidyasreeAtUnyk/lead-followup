@@ -68,10 +68,16 @@ parameterized tool would either weaken the guardrails or push the distinction ba
 prompt, which is exactly what this system is designed not to depend on.
 
 **`segment` shapes prompts, not code paths.** There is one stage graph, one set of tools, and one
-loop for both `prospect` and `client` leads. The only place `segment` matters is
-`buildSystemPrompt`/the lead context handed to the model, which tells it to frame a `client`
-lead's outreach as an upgrade pitch. A `won` transition flips `segment` and resets `stage` to
-`new` in the exact same funnel — there is no second pipeline.
+loop for both `prospect` and `client` leads. The only place `segment` matters is the static
+conditional guidance in `buildSystemPrompt` (`src/agent/prompts.ts`), which tells the model how to
+frame a `client` lead's outreach as an upgrade pitch once it sees `segment` in `get_lead_context`'s
+own output — deliberately not passed in as a fact ahead of time, so the model still discovers it
+through the same audited tool call as everything else about the lead. (This was briefly dead code:
+an earlier `leadContextHint` helper computed this guidance but was never actually wired into the
+loop -- caught and fixed after noticing an unrelated do-not-contact lead was escalating purely from
+a rate-limit failure rather than any real reasoning, which prompted a closer look at what the model
+was actually being told.) A `won` transition flips `segment` and resets `stage` to `new` in the
+exact same funnel — there is no second pipeline.
 
 **Numeric grounding.** The model may only *narrate* prices/trends, never originate them.
 `get_property_market_data` (`src/tools/getPropertyMarketData.ts`) is the single source of those
@@ -127,6 +133,13 @@ could ignore. Concretely:
      only — it returns a signal the model can reason with, but its return value has no bearing on
      whether `propose_message`/`send_message` will succeed. The guardrail cannot be bypassed by
      the model just not calling (or misreading) the advisory tool.
+   - The *enforcement* is entirely tool-level and doesn't depend on the model at all, but the
+     *prompt* (`src/agent/prompts.ts`) was tightened to make `do_not_contact` the model's first
+     priority right after `get_lead_context` — check it before inspecting proposals, before
+     `check_contact_eligibility`, before anything else — since no valid outreach action exists for
+     such a lead regardless of what else is true about it. This is purely an efficiency/clarity
+     improvement (fewer wasted turns), not a substitute for the guardrail: a model that ignored
+     this instruction entirely would still be stopped cold by `propose_message`/`send_message`.
 
 2. **Stage transitions only along the funnel graph.** `src/domain/stateMachine.ts` is the single
    source of truth for legal edges (`STAGE_EDGES`). `propose_viewing` checks `stage === 'qualified'`
