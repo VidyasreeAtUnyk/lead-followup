@@ -6,6 +6,12 @@ import { ToolError } from "../domain/errors.js";
 const schema = z.object({
   lead_id: z.number().int().positive(),
   reason: z.string().min(1),
+  // Internal-only flag, never part of the JSON schema exposed to the model
+  // (see agent/openaiTools.ts) -- set exclusively by the agent loop's own
+  // safety-net escalations (LLM call failed, no tool call, max turns) so
+  // isParkedOnEscalation can tell those apart from a genuine judgment call
+  // the model itself made. The model has no way to set this to true.
+  system_triggered: z.boolean().optional(),
 });
 
 export const escalateToAgent: ToolDefinition<z.infer<typeof schema>> = {
@@ -16,6 +22,12 @@ export const escalateToAgent: ToolDefinition<z.infer<typeof schema>> = {
   execute: (db, input) => {
     const lead = getLead(db, input.lead_id);
     if (!lead) throw new ToolError("NOT_FOUND", `No lead with id ${input.lead_id}.`);
-    return { ok: true as const, lead_id: input.lead_id, escalated: true, reason: input.reason };
+    return {
+      ok: true as const,
+      lead_id: input.lead_id,
+      escalated: true,
+      reason: input.reason,
+      system_triggered: input.system_triggered ?? false,
+    };
   },
 };

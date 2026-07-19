@@ -29,10 +29,27 @@ function isRetryableStatus(status: unknown): boolean {
   return status === 429 || (typeof status === "number" && status >= 500 && status < 600);
 }
 
+// If the API tells us how long to wait and it's longer than this, no amount
+// of in-process backoff will make the retry succeed before the caller gives
+// up anyway (e.g. a daily quota that resets in 20+ minutes, not 10 seconds).
+// Retrying anyway just burns more requests against the same exhausted quota
+// for zero chance of success -- fail fast instead.
+const MAX_WORTHWHILE_RETRY_AFTER_SECONDS = 30;
+
+function retryAfterSeconds(e: unknown): number | null {
+  const headers = (e as { headers?: Record<string, string> })?.headers;
+  const raw = headers?.["retry-after"];
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
 /**
  * Exponential backoff with jitter on 429/5xx only -- anything else (bad
  * request, auth failure, etc.) is not transient and is rethrown immediately
- * so we don't waste turns retrying something that will never succeed.
+ * so we don't waste turns retrying something that will never succeed. Also
+ * fails fast (no retries at all) when the server's own retry-after says the
+ * wait would be pointless within this run -- see MAX_WORTHWHILE_RETRY_AFTER_SECONDS.
  */
 async function createCompletionWithRetry(
   client: OpenAI,
@@ -49,7 +66,10 @@ async function createCompletionWithRetry(
     } catch (e) {
       lastError = e;
       const status = (e as { status?: unknown })?.status;
-      if (attempt === maxRetries || !isRetryableStatus(status)) throw e;
+      if (!isRetryableStatus(status)) throw e;
+      const waitSeconds = retryAfterSeconds(e);
+      if (waitSeconds !== null && waitSeconds > MAX_WORTHWHILE_RETRY_AFTER_SECONDS) throw e;
+      if (attempt === maxRetries) throw e;
       const backoff = baseDelayMs * 2 ** attempt;
       const jittered = backoff / 2 + Math.random() * (backoff / 2);
       await sleep(jittered);
@@ -158,6 +178,7 @@ export async function runAgentForLead(
       dispatchToolCall(db, leadId, "escalate_to_agent", {
         lead_id: leadId,
         reason: `LLM call failed after retries: ${message}`,
+        system_triggered: true,
       });
       onProgress?.({ turn: turns, phase: "tool_call", toolName: "escalate_to_agent", tokensSoFar: totalTokens });
       return finish({ kind: "escalated", reason: "llm_call_failed" }, turns);
@@ -177,6 +198,7 @@ export async function runAgentForLead(
         dispatchToolCall(db, leadId, "escalate_to_agent", {
           lead_id: leadId,
           reason: `Agent stopped calling tools without reaching a decision. Last message: ${message.content ?? "(empty)"}`,
+          system_triggered: true,
         });
         onProgress?.({ turn: turns, phase: "tool_call", toolName: "escalate_to_agent", tokensSoFar: totalTokens });
         return finish({ kind: "escalated", reason: "no_tool_call" }, turns);
@@ -225,6 +247,7 @@ export async function runAgentForLead(
   dispatchToolCall(db, leadId, "escalate_to_agent", {
     lead_id: leadId,
     reason: `Agent loop exceeded ${MAX_ASSISTANT_TURNS} turns without reaching a stopping point.`,
+    system_triggered: true,
   });
   onProgress?.({ turn: turns, phase: "tool_call", toolName: "escalate_to_agent", tokensSoFar: totalTokens });
   return finish({ kind: "escalated", reason: "max_turns_exceeded" }, turns);

@@ -6,7 +6,16 @@ import { Command } from "commander";
 import chalk from "chalk";
 import Table from "cli-table3";
 import { getDb, DEFAULT_DB_PATH } from "../db/client.js";
-import { listLeads, listProposals, getProposal, getLead, listAudit, updateProposal, insertAudit } from "../db/queries.js";
+import {
+  listLeads,
+  listProposals,
+  getProposal,
+  getLead,
+  listAudit,
+  updateProposal,
+  insertAudit,
+  isParkedOnEscalation,
+} from "../db/queries.js";
 import { colorStage, truncate, formatTimestamp } from "./format.js";
 import { RunProgressRenderer } from "./progress.js";
 import { processQueue } from "../agent/runQueue.js";
@@ -191,6 +200,31 @@ program
         throw e;
       }
     }
+  });
+
+program
+  .command("retry <leadId>")
+  .description("Human action: clear a lead's escalation park so the agent will process it again")
+  .action((leadIdArg: string) => {
+    const leadId = Number(leadIdArg);
+    const database = db();
+    const lead = getLead(database, leadId);
+    if (!lead) {
+      console.log(chalk.red(`No lead with id ${leadId}.`));
+      return;
+    }
+    if (!isParkedOnEscalation(database, leadId)) {
+      console.log(chalk.dim(`Lead ${leadId} isn't currently parked on an escalation -- nothing to do.`));
+      return;
+    }
+    insertAudit(database, {
+      lead_id: leadId,
+      tool_name: "retry_lead",
+      input_json: { lead_id: leadId },
+      output_json: { ok: true, unparked: true },
+      actor: "human",
+    });
+    console.log(chalk.green(`Lead ${leadId} un-parked -- it will be picked up on the next process run.`));
   });
 
 program

@@ -143,3 +143,51 @@ which is the intended graceful-degradation behavior, not silent corruption or a 
 `npm run evals` run on a day with unused quota (or a higher-tier key) should reproduce the original
 7/7 pass; this is flagged as a known limitation of verifying against a free-tier key rather than a
 gap in the implementation.
+
+## Entry 12 — Live progress display for `cli process`
+
+Asked to show live progress while a run is in flight -- elapsed time, tokens used, current tool --
+similar to how Claude Code's own CLI shows its status. Added an optional `onProgress` callback to
+`runAgentForLead`, firing on every "thinking" (about to call OpenAI) and "tool_call" (a tool just
+resolved) tick with the turn number, tool name, and cumulative token count. `processQueue` forwards
+this per-lead. `cli/progress.ts` renders it as a spinner (elapsed time, tokens) that gets replaced
+by a permanent checkmark line each time a tool call completes, ending in a final outcome line.
+Purely additive -- the callback is optional everywhere, so nothing about evals/tests/resumability
+changes when it isn't supplied. Verified with a deterministic test (a scripted fake OpenAI client
+returning canned tool calls, no live API needed) confirming the exact event sequence and token
+counts, plus a direct visual check of the renderer's raw terminal output.
+
+## Entry 13 — Escalation parking was too coarse, plus request-efficiency pass
+
+Using the new progress display surfaced a real usability gap: a lead that had escalated purely
+because the LLM call itself failed (a 429 during earlier testing) was permanently excluded from the
+queue -- `cli process 1` reported "queue is empty" even when explicitly naming the lead, because
+`isParkedOnEscalation` treated every escalation identically, whether the model made a genuine
+judgment call (contradictory signals, do-not-contact) or the agent loop's own safety net gave up
+after an infrastructure hiccup. There was also no way to un-park a lead short of wiping the database.
+
+Fixed both, plus a related efficiency ask (the dev account's 50-request/day cap): `escalate_to_agent`
+gained an internal-only `system_triggered` flag on its Zod schema -- present in the tool's contract
+but deliberately absent from the JSON schema exposed to the model in `openaiTools.ts`, so the model
+has no way to set it. The three safety-net call sites in `loop.ts` (LLM call failed, no tool call
+returned, turn budget exceeded) now pass `system_triggered: true`; `isParkedOnEscalation` only parks
+on an escalation where that flag is absent, i.e. one the model itself chose to make. A rate-limited
+run now self-heals on the next `process` pass with no human action needed. For the cases that
+should still require a person (a genuine business escalation), added `cli retry <leadId>` -- a
+human action, audited like approve/reject, that simply writes a new audit row so the lead falls out
+of the park automatically (parking is derived purely from "what's the most recent audit_log row,"
+so any newer row un-parks it without special-casing).
+
+For the efficiency half of the ask: added a fail-fast path to the retry/backoff logic --
+`createCompletionWithRetry` now reads the `retry-after` value off a 429's response headers, and if
+it's longer than 30 seconds (a daily-quota-scale wait, not a brief per-minute one), skips all
+retries and escalates immediately rather than burning 3+ more doomed requests against an already-
+exhausted quota. Also added explicit prompt guidance (`prompts.ts`) encouraging the model to batch
+independent read-only tool calls (get_lead_context, check_contact_eligibility,
+find_matching_properties, get_property_market_data) into a single turn rather than one at a time,
+since each turn is a full request against the rate limit regardless of how many tool calls it
+contains. Verified all of this with new deterministic tests (`escalation.test.ts`, plus two new
+cases in `retry.test.ts` for the fail-fast/still-retries-short-waits behavior), then confirmed live
+against the actual parked lead from the session: `cli retry 1` un-parked it, `cli process 1` hit the
+same still-exhausted daily quota but failed fast (~2.5s, consistent with one rejected request and no
+wasted retries) and correctly did not re-park the lead this time.

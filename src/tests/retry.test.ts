@@ -11,13 +11,14 @@ function seedMinimalLead(db: ReturnType<typeof createTestDb>, id: number): void 
   ).run({ $id: id } as never);
 }
 
-function makeThrowingClient(status: number, message: string): OpenAI {
+function makeThrowingClient(status: number, message: string, headers?: Record<string, string>): OpenAI {
   return {
     chat: {
       completions: {
         create: async () => {
-          const err = new Error(message) as Error & { status: number };
+          const err = new Error(message) as Error & { status: number; headers?: Record<string, string> };
           err.status = status;
+          err.headers = headers;
           throw err;
         },
       },
@@ -59,6 +60,44 @@ export const retryTests: Test[] = [
 
       assertTrue(result.outcome.kind === "escalated", `expected escalated outcome, got ${result.outcome.kind}`);
       assertTrue(elapsedMs < 500, `expected a non-retryable error to fail fast with no backoff delay, took ${elapsedMs}ms`);
+    },
+  },
+  {
+    name: "runAgentForLead fails fast (no retries) on a 429 whose retry-after is too long to be worth waiting for",
+    run: async () => {
+      const db = createTestDb();
+      seedMinimalLead(db, 3);
+      // Mirrors a real daily-quota 429: a huge retry-after (e.g. 1728s) means
+      // no amount of in-process backoff will succeed -- retrying is pure waste.
+      const stubClient = makeThrowingClient(429, "simulated daily quota exhausted", { "retry-after": "1728" });
+      const start = Date.now();
+
+      const result = await runAgentForLead(db, 3, stubClient, { maxRetries: 5, baseDelayMs: 1000 });
+      const elapsedMs = Date.now() - start;
+
+      assertTrue(result.outcome.kind === "escalated", `expected escalated outcome, got ${result.outcome.kind}`);
+      assertTrue(
+        elapsedMs < 500,
+        `expected to fail fast (skip all retries) when retry-after is too long to be worth it, took ${elapsedMs}ms`
+      );
+    },
+  },
+  {
+    name: "runAgentForLead still retries a 429 with a short retry-after (worth waiting for)",
+    run: async () => {
+      const db = createTestDb();
+      seedMinimalLead(db, 4);
+      const stubClient = makeThrowingClient(429, "simulated brief rate limit", { "retry-after": "1" });
+
+      const result = await runAgentForLead(db, 4, stubClient, { maxRetries: 2, baseDelayMs: 10 });
+
+      assertTrue(result.outcome.kind === "escalated", `expected escalated outcome, got ${result.outcome.kind}`);
+      const audit = listAudit(db, 4);
+      const escalateRow = audit.find((r) => r.tool_name === "escalate_to_agent");
+      assertTrue(
+        Boolean(escalateRow) && escalateRow!.input_json.includes("LLM call failed after retries"),
+        "expected it to still exhaust the (short) retry budget before escalating"
+      );
     },
   },
 ];

@@ -196,10 +196,17 @@ export function listPriceHistory(db: DatabaseSync, propertyId: number): Property
 }
 
 /**
- * True once the most recent audit_log entry for this lead is a successful
- * escalate_to_agent call -- used to keep the queue from re-escalating the
- * same lead every run. A human action (approve/reject) or a fresh tool call
- * writes a newer audit row and un-parks it.
+ * True once the most recent audit_log entry for this lead is a successful,
+ * model-decided escalate_to_agent call -- used to keep the queue from
+ * re-escalating the same lead every run. A human action (approve/reject/
+ * retry) or a fresh tool call writes a newer audit row and un-parks it.
+ *
+ * Escalations the agent loop triggers itself as a safety net (the LLM call
+ * failed, the model stopped calling tools, the turn budget ran out) are
+ * marked `system_triggered` and do NOT park the lead -- those aren't a
+ * judgment call about the lead, they're an infrastructure hiccup, so the
+ * lead should simply be picked up again on the next process pass rather
+ * than sitting stuck until a human explicitly retries it.
  */
 export function isParkedOnEscalation(db: DatabaseSync, leadId: number): boolean {
   const row = normalizeRow<{ tool_name: string; output_json: string } | undefined>(
@@ -210,8 +217,8 @@ export function isParkedOnEscalation(db: DatabaseSync, leadId: number): boolean 
   if (!row) return false;
   if (row.tool_name !== "escalate_to_agent") return false;
   try {
-    const output = JSON.parse(row.output_json) as { escalated?: boolean };
-    return Boolean(output.escalated);
+    const output = JSON.parse(row.output_json) as { escalated?: boolean; system_triggered?: boolean };
+    return Boolean(output.escalated) && !output.system_triggered;
   } catch {
     return false;
   }
