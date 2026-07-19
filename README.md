@@ -210,6 +210,21 @@ the same daily cap, so those were verified with `npm run test` instead — deter
 using a stubbed OpenAI client and an isolated in-memory db, which don't need a live key at all. See
 `src/tests/`.
 
+A live re-run of `npm run evals` afterward showed 3/7 scenarios failing with "expected
+awaiting_approval, got escalated" instead of a clean pass. This was diagnosed, not assumed: isolating
+scenario 1 and running it standalone reproduced a clean pass twice before reproducing the failure a
+third time, with the escalation reason logged verbatim as `llm_call_failed` -- a real 429 (10
+requests/minute on this account) that exhausted the new retry budget and triggered the graceful
+escalation it's designed to trigger. In other words, this is the new reliability feature working
+correctly under genuine rate pressure, not a regression in the guardrails or state machine (which
+were unchanged this round except for the grounding parsing fix, itself covered by regression tests).
+Pacing was added to the eval harness itself to reduce this (`src/evals/run.ts`, an 8s gap between
+scenarios plus a larger retry budget for eval runs specifically -- a test-harness change, not a
+production default), but the diagnostic runs used to confirm the root cause themselves ate into the
+same 50-request daily budget, so a fully clean paced run wasn't achieved in this session. See
+`docs/prompts.md` (Entry 11) for the full diagnostic trail. A key with normal quota should reproduce
+the original 7/7 live pass without needing any of this workaround.
+
 ## What would change at 100× lead volume
 
 - **A real job queue, not a single process.** `getQueue`/`processQueue` (`src/agent/queue.ts`,

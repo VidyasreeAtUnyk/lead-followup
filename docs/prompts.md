@@ -111,5 +111,35 @@ workers racing for the same lead only let one proceed; and a lightweight `run_me
 average proposal-approval turnaround) as a first step toward real observability. All three were
 verified with deterministic unit tests (`npm run test`, a stubbed OpenAI client, isolated in-memory
 dbs) rather than live API calls, since the dev key's 50-request/day quota was already exhausted from
-earlier live verification — the full eval suite (`npm run evals`) was re-run afterward to confirm no
-regressions to the seven required scenarios.
+earlier live verification. See Entry 11 for what happened when the live eval suite was re-run
+afterward.
+
+## Entry 11 — Live eval re-run surfaced rate limiting, not a regression
+
+Re-ran `npm run evals` live once the dev key's quota appeared to free up partway through the
+session. First attempt: 2/7 scenarios failed with "expected awaiting_approval, got escalated" on
+scenarios 1 and 3. Diagnosed by reproducing scenario 1 standalone with full audit-log output —
+it succeeded cleanly on the first two reproductions, which ruled out a deterministic code bug and
+pointed at rate-limit flakiness instead. A third reproduction confirmed it directly: the escalation
+was `llm_call_failed` with the underlying error being a 429 on requests-per-minute (limit 10/min) —
+i.e. the new retry/backoff feature correctly rode out what it could and gracefully escalated once
+its retry budget was exhausted, exactly as designed. That's the reliability feature working, not a
+defect in it.
+
+Added pacing to the eval harness itself (an 8-second gap between scenarios, a more generous
+retry budget for eval runs specifically) since this is a test-harness concern, not a change to
+production defaults or domain logic. Re-ran the full suite again: 3/7 failed this time, worse than
+before, with the same escalation signature starting on scenario 1 immediately. Root cause: the
+diagnostic reproductions used to confirm the RPM theory themselves consumed a meaningful slice of
+the day's 50-request cap, so the very quota needed for a clean full run was partly gone before the
+paced attempt even started. Decided not to keep spending the remaining daily budget chasing a clean
+run (each attempt burns quota that could complete a future clean one) and to document this
+precisely instead: the seven scenarios' domain logic is unchanged and was fully verified live before
+this upgrade round (see the original README section on what was verified live); this round's new
+code (grounding fix, retry/backoff, locking, metrics) was verified deterministically via `npm run
+test` (15/15 passing, no API key needed); and the only new *failure mode* introduced is that a
+sufficiently rate-limited account can turn a would-be `awaiting_approval` into an `escalated` --
+which is the intended graceful-degradation behavior, not silent corruption or a crash. A fresh
+`npm run evals` run on a day with unused quota (or a higher-tier key) should reproduce the original
+7/7 pass; this is flagged as a known limitation of verifying against a free-tier key rather than a
+gap in the implementation.

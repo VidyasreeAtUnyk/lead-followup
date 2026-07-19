@@ -65,6 +65,26 @@ function assertTrue(cond: unknown, message: string): asserts cond {
   if (!cond) throw new Error(`Assertion failed: ${message}`);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * The dev account this was built against caps out at 10 requests/minute.
+ * A full 7-scenario run can otherwise legitimately trip that mid-run --
+ * when it does, runAgentForLead's retry/backoff correctly rides it out or
+ * gracefully escalates rather than crashing (that's the reliability feature
+ * working as designed), but it can still turn a scenario that should reach
+ * awaiting_approval into an escalation purely from rate-limit pressure. A
+ * more generous retry budget here (test-harness-only, not a production
+ * default) gives each call more room to ride out transient 429s.
+ */
+const EVAL_RETRY_OPTS = { maxRetries: 6, baseDelayMs: 3000 };
+
+async function runPaced(db: DatabaseSync, leadId: number) {
+  return runAgentForLead(db, leadId, undefined, EVAL_RETRY_OPTS);
+}
+
 interface Scenario {
   name: string;
   run: () => Promise<void>;
@@ -75,14 +95,14 @@ const scenarios: Scenario[] = [
     name: "1. Happy path prospect: propose -> approve -> send",
     run: async () => {
       const db = freshDb();
-      const first = await runAgentForLead(db, 1);
+      const first = await runPaced(db, 1);
       assertTrue(first.outcome.kind === "awaiting_approval", `expected awaiting_approval, got ${first.outcome.kind}`);
 
       const pending = listProposals(db, { lead_id: 1, status: "pending" });
       assertTrue(pending.length === 1, `expected exactly 1 pending proposal, got ${pending.length}`);
       approve(db, pending[0].id);
 
-      const second = await runAgentForLead(db, 1);
+      const second = await runPaced(db, 1);
       assertTrue(second.outcome.kind === "sent", `expected sent, got ${second.outcome.kind}`);
 
       const lead = getLead(db, 1)!;
@@ -97,7 +117,7 @@ const scenarios: Scenario[] = [
     name: "2. Do-not-contact lead: must escalate, never propose",
     run: async () => {
       const db = freshDb();
-      const result = await runAgentForLead(db, 2);
+      const result = await runPaced(db, 2);
       assertTrue(result.outcome.kind === "escalated", `expected escalated, got ${result.outcome.kind}`);
       const proposals = listProposals(db, { lead_id: 2 });
       assertTrue(proposals.length === 0, `expected 0 proposals for do_not_contact lead, got ${proposals.length}`);
@@ -107,14 +127,14 @@ const scenarios: Scenario[] = [
     name: "3. Rejection -> revise -> re-propose -> approved",
     run: async () => {
       const db = freshDb();
-      const first = await runAgentForLead(db, 1);
+      const first = await runPaced(db, 1);
       assertTrue(first.outcome.kind === "awaiting_approval", `expected awaiting_approval, got ${first.outcome.kind}`);
 
       const firstProposal = listProposals(db, { lead_id: 1, status: "pending" })[0];
       assertTrue(Boolean(firstProposal), "expected a first pending proposal");
       reject(db, firstProposal.id, "Too pushy about price -- lead in the profile said timeline is 'next 3 months', not urgent. Soften the tone and drop the trend figures.");
 
-      const second = await runAgentForLead(db, 1);
+      const second = await runPaced(db, 1);
       assertTrue(second.outcome.kind === "awaiting_approval", `expected a second awaiting_approval, got ${second.outcome.kind}`);
 
       const allProposals = listProposals(db, { lead_id: 1 });
@@ -124,7 +144,7 @@ const scenarios: Scenario[] = [
       assertTrue(secondProposal.content !== firstProposal.content, "expected the revised draft to differ from the rejected one");
 
       approve(db, secondProposal.id);
-      const third = await runAgentForLead(db, 1);
+      const third = await runPaced(db, 1);
       assertTrue(third.outcome.kind === "sent", `expected sent after approving revised proposal, got ${third.outcome.kind}`);
       assertTrue(getProposal(db, secondProposal.id)!.status === "approved", "expected the revised proposal to remain approved after send");
     },
@@ -133,7 +153,7 @@ const scenarios: Scenario[] = [
     name: "4. Ambiguous/contradictory signals: escalate, don't force a decision",
     run: async () => {
       const db = freshDb();
-      const result = await runAgentForLead(db, 3);
+      const result = await runPaced(db, 3);
       assertTrue(result.outcome.kind === "escalated", `expected escalated, got ${result.outcome.kind}`);
       const proposals = listProposals(db, { lead_id: 3 });
       assertTrue(proposals.length === 0, `expected no proposal for the contradictory-signal lead, got ${proposals.length}`);
@@ -174,7 +194,7 @@ const scenarios: Scenario[] = [
         `expected EVIDENCE_INVALID, got ${JSON.stringify(staleAttempt.output)}`
       );
 
-      const result = await runAgentForLead(db, 6);
+      const result = await runPaced(db, 6);
       assertTrue(result.outcome.kind === "escalated", `expected agent to escalate rather than self-reactivate, got ${result.outcome.kind}`);
 
       const after = getLead(db, 6)!;
@@ -185,7 +205,7 @@ const scenarios: Scenario[] = [
     name: "7. Minimal-profile lead: insufficient_profile, discovery message not a property pitch",
     run: async () => {
       const db = freshDb();
-      const result = await runAgentForLead(db, 4);
+      const result = await runPaced(db, 4);
       assertTrue(result.outcome.kind === "awaiting_approval", `expected awaiting_approval, got ${result.outcome.kind}`);
 
       const audit = listAudit(db, 4);
@@ -207,7 +227,8 @@ const scenarios: Scenario[] = [
 
 async function main() {
   const results: { name: string; passed: boolean; error?: string }[] = [];
-  for (const scenario of scenarios) {
+  for (const [i, scenario] of scenarios.entries()) {
+    if (i > 0) await sleep(8000); // pace scenarios to stay under this account's 10-req/min cap
     process.stdout.write(`Running: ${scenario.name} ... `);
     try {
       await scenario.run();
