@@ -70,6 +70,15 @@ export interface RunResult {
   assistantTurns: number;
 }
 
+export interface RunProgress {
+  turn: number;
+  phase: "thinking" | "tool_call";
+  toolName?: string;
+  tokensSoFar: number;
+}
+
+export type ProgressCallback = (progress: RunProgress) => void;
+
 function getClient(): OpenAI {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
@@ -93,7 +102,8 @@ export async function runAgentForLead(
   db: DatabaseSync,
   leadId: number,
   client: OpenAI = getClient(),
-  retryOpts: RetryOptions = {}
+  retryOpts: RetryOptions = {},
+  onProgress?: ProgressCallback
 ): Promise<RunResult> {
   const lead = getLead(db, leadId);
   if (!lead) throw new Error(`No lead with id ${leadId}`);
@@ -130,6 +140,7 @@ export async function runAgentForLead(
 
   while (turns < MAX_ASSISTANT_TURNS) {
     turns += 1;
+    onProgress?.({ turn: turns, phase: "thinking", tokensSoFar: totalTokens });
 
     let completion: OpenAI.Chat.Completions.ChatCompletion;
     try {
@@ -148,6 +159,7 @@ export async function runAgentForLead(
         lead_id: leadId,
         reason: `LLM call failed after retries: ${message}`,
       });
+      onProgress?.({ turn: turns, phase: "tool_call", toolName: "escalate_to_agent", tokensSoFar: totalTokens });
       return finish({ kind: "escalated", reason: "llm_call_failed" }, turns);
     }
 
@@ -166,6 +178,7 @@ export async function runAgentForLead(
           lead_id: leadId,
           reason: `Agent stopped calling tools without reaching a decision. Last message: ${message.content ?? "(empty)"}`,
         });
+        onProgress?.({ turn: turns, phase: "tool_call", toolName: "escalate_to_agent", tokensSoFar: totalTokens });
         return finish({ kind: "escalated", reason: "no_tool_call" }, turns);
       }
       messages.push({
@@ -193,6 +206,7 @@ export async function runAgentForLead(
         tool_call_id: toolCall.id,
         content: JSON.stringify(result.output),
       });
+      onProgress?.({ turn: turns, phase: "tool_call", toolName: toolCall.function.name, tokensSoFar: totalTokens });
 
       if (result.ok && TERMINAL_TOOLS.has(toolCall.function.name)) {
         if (toolCall.function.name === "send_message") {
@@ -212,5 +226,6 @@ export async function runAgentForLead(
     lead_id: leadId,
     reason: `Agent loop exceeded ${MAX_ASSISTANT_TURNS} turns without reaching a stopping point.`,
   });
+  onProgress?.({ turn: turns, phase: "tool_call", toolName: "escalate_to_agent", tokensSoFar: totalTokens });
   return finish({ kind: "escalated", reason: "max_turns_exceeded" }, turns);
 }

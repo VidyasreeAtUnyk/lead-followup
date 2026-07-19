@@ -8,6 +8,7 @@ import Table from "cli-table3";
 import { getDb, DEFAULT_DB_PATH } from "../db/client.js";
 import { listLeads, listProposals, getProposal, getLead, listAudit, updateProposal, insertAudit } from "../db/queries.js";
 import { colorStage, truncate, formatTimestamp } from "./format.js";
+import { RunProgressRenderer } from "./progress.js";
 import { processQueue } from "../agent/runQueue.js";
 import { closeDeal, type DealOutcome } from "../domain/dealClose.js";
 import { isToolError } from "../domain/errors.js";
@@ -141,13 +142,31 @@ program
   .action(async (leadIdArg?: string) => {
     const only = leadIdArg ? Number(leadIdArg) : undefined;
     const database = db();
-    const results = await processQueue(database, undefined, only);
+
+    let renderer: RunProgressRenderer | null = null;
+    let activeLeadId: number | null = null;
+
+    const results = await processQueue(database, undefined, only, undefined, {
+      onProgress: (leadId, progress) => {
+        if (activeLeadId !== leadId) {
+          activeLeadId = leadId;
+          const lead = getLead(database, leadId);
+          renderer = new RunProgressRenderer();
+          renderer.startLead(`Lead ${leadId}${lead ? ` (${lead.name})` : ""}`);
+        }
+        renderer?.onProgress(progress);
+      },
+      onLeadResult: (result) => {
+        renderer?.finishLead(
+          `${chalk.bold(result.outcome.kind)} -- Lead ${result.leadId} (${result.assistantTurns} turn(s))`
+        );
+        renderer = null;
+        activeLeadId = null;
+      },
+    });
+
     if (results.length === 0) {
       console.log(chalk.dim("Queue is empty -- nothing to process."));
-      return;
-    }
-    for (const r of results) {
-      console.log(`Lead ${r.leadId}: ${chalk.bold(r.outcome.kind)} (${r.assistantTurns} turn(s))`);
     }
   });
 

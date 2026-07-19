@@ -2,8 +2,9 @@ import type { Test } from "./testHelpers.js";
 import { groundingTests } from "./grounding.test.js";
 import { retryTests } from "./retry.test.js";
 import { lockingTests } from "./locking.test.js";
+import { progressTests } from "./progress.test.js";
 
-const allTests: Test[] = [...groundingTests, ...retryTests, ...lockingTests];
+const allTests: Test[] = [...groundingTests, ...retryTests, ...lockingTests, ...progressTests];
 
 async function main() {
   let failures = 0;
