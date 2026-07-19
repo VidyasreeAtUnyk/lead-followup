@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -20,6 +20,7 @@ let instancePath: string | null = null;
 export function getDb(dbPath: string = DEFAULT_DB_PATH): DatabaseSync {
   if (instance && instancePath === dbPath) return instance;
   if (instance) instance.close();
+  mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new DatabaseSync(dbPath);
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA foreign_keys = ON;");
