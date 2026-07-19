@@ -17,9 +17,13 @@ npm run cli -- process 1    # agent sees the approval and calls send_message
 npm run cli -- history 1    # full audit trail for lead 1
 ```
 
-`npm run cli -- process` (no id) drains the whole queue, one lead at a time.
+`npm run cli -- process` (no id) drains the whole queue, one lead at a time, showing a live spinner
+(elapsed time, tokens so far) that's replaced by a permanent line each time a tool call resolves —
+see `src/cli/progress.ts`.
 `npm run cli -- close <leadId> <won|lost|canceled>` is the human action that records a
 closed deal (see "Why there's no `close_deal` tool" below).
+`npm run cli -- retry <leadId>` is the human action that un-parks a lead stuck on an escalation
+(see "Human-in-the-loop" below).
 
 Other scripts:
 
@@ -183,6 +187,20 @@ proposal and similarly un-blocks the lead; the next run is instructed to treat t
 required feedback — revise, try a different approach, or escalate, but never silently re-propose
 the same content.
 
+**Escalation parking.** A lead whose most recent action is a successful `escalate_to_agent` call is
+excluded from the queue (`isParkedOnEscalation`, `src/db/queries.ts`) so the agent doesn't
+re-escalate the same lead every pass — but only when that escalation was the *model's own* judgment
+call (contradictory signals, `do_not_contact`, and so on). `escalate_to_agent`'s Zod schema carries
+an internal-only `system_triggered` flag — part of the tool's contract but deliberately absent from
+the JSON schema exposed to the model in `openaiTools.ts`, so the model has no way to set it. The
+three safety-net escalations the loop itself triggers (the LLM call failed, the model stopped
+calling tools, the turn budget ran out) pass `system_triggered: true`, and those do **not** park the
+lead — an infrastructure hiccup isn't a judgment call about the lead, so it's simply retried
+automatically on the next `process` pass. For the escalations that *should* still wait on a person,
+`cli retry <leadId>` is the explicit human action that clears the park — logged like approve/reject,
+it just writes a new audited row, which is enough to un-park the lead since parking is derived
+purely from "what's the most recent `audit_log` row for this lead."
+
 ## What was verified live
 
 I ran this against the real OpenAI API (function calling, not mocked) for every scenario during
@@ -225,6 +243,16 @@ same 50-request daily budget, so a fully clean paced run wasn't achieved in this
 `docs/prompts.md` (Entry 11) for the full diagnostic trail. A key with normal quota should reproduce
 the original 7/7 live pass without needing any of this workaround.
 
+That same rate-limit pressure surfaced a real usability bug, not just an eval-flakiness one: a lead
+that escalated purely from a failed LLM call was permanently excluded from the queue -- `cli process
+<id>` reported "queue is empty" even when the lead was named explicitly, because parking didn't
+distinguish an infrastructure hiccup from a genuine model decision. Fixed (see "Escalation parking"
+above) and verified against the actual stuck lead from this session: `cli retry 1` un-parked it,
+then `cli process 1` hit the same still-exhausted daily quota but failed fast (~2.5s, roughly one
+rejected request's network round trip, instead of the retry budget's worst case) via a new
+retry-after-aware fail-fast check in `createCompletionWithRetry`, and correctly did not re-park the
+lead this time. `docs/prompts.md` (Entry 13) has the full trail.
+
 ## What would change at 100× lead volume
 
 - **A real job queue, not a single process.** `getQueue`/`processQueue` (`src/agent/queue.ts`,
@@ -238,12 +266,20 @@ the original 7/7 live pass without needing any of this workaround.
   per call; at volume you'd prefetch/batch these (e.g., load a worker's whole shard of leads'
   contexts in one query) rather than a round trip per lead per tool call.
 - **Rate-limited, budgeted LLM calls.** `src/agent/loop.ts` now retries 429/5xx with exponential
-  backoff and jitter (3 attempts) and escalates gracefully instead of crashing once retries are
-  exhausted -- the minimum bar, and something I hit personally during development. At real volume
-  you'd add a hard token/cost budget per run (the new `run_metrics` table's
-  `estimated_token_cost` is a first step toward even seeing this), a request-rate limiter shared
-  across workers instead of per-process retry, and probably a cheaper/faster model for routine
-  qualification-stage leads with escalation to a stronger model only for ambiguous cases.
+  backoff and jitter (3 attempts), fails fast with zero retries when the response's `retry-after`
+  is too long to be worth waiting for (a daily-quota-scale wait vs. a brief per-minute one -- no
+  point burning more requests against a quota that's already exhausted for the day), and escalates
+  gracefully instead of crashing once retries are exhausted -- the minimum bar, and something I hit
+  personally during development against a real 50-request/day account. The system prompt also
+  nudges the model to batch independent read-only tool calls (`get_lead_context`,
+  `check_contact_eligibility`, `find_matching_properties`, `get_property_market_data`) into a single
+  turn rather than one at a time, since each turn is a full request regardless of how many tool
+  calls it contains -- a real lever for requests-per-run, since a rate limit like this one caps
+  *requests*, not tokens. At real volume you'd still want a hard token/cost budget per run (the new
+  `run_metrics` table's `estimated_token_cost` is a first step toward even seeing this), a
+  request-rate limiter shared across workers instead of per-process retry, and probably a
+  cheaper/faster model for routine qualification-stage leads with escalation to a stronger model
+  only for ambiguous cases.
 - **SQLite itself.** `node:sqlite` is perfect for a single-process take-home; at 100× volume with
   multiple workers you'd move to Postgres for real concurrent writers (SQLite's single-writer
   model would become the bottleneck), keeping the same schema and guardrail logic almost verbatim
@@ -260,8 +296,8 @@ the original 7/7 live pass without needing any of this workaround.
 - **Any notion of the agent marking a deal `won`/`lost`/`canceled`.** As above, this is treated as
   a human fact, not something to reverse-engineer a tool for.
 - **CLI polish beyond `chalk`/`cli-table3` on the required commands** (`dashboard`, `proposals`,
-  `history`, `approve`, `reject`), plus the `process`/`close` commands needed to actually drive the
-  loop. No pagination, filtering flags, interactive prompts, etc.
+  `history`, `approve`, `reject`), plus the `process`/`close`/`retry`/`metrics` commands needed to
+  actually drive the loop and observe it. No pagination, filtering flags, interactive prompts, etc.
 - **Real send integrations, auth, deployment, RAG/embeddings, multi-agent setups** — all explicitly
   out of scope per the brief; `send_message` is mocked and clearly labeled as such.
 
