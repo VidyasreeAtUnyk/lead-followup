@@ -26,7 +26,9 @@ Other scripts:
 ```bash
 npm run reset-db      # wipes data/leads.sqlite
 npm run evals         # runs the 7 scripted scenarios in src/evals/run.ts against a throwaway db
+npm run test          # deterministic unit tests (grounding parsing, retry/backoff, locking) -- no API key needed
 npm run demo:resume   # kills the agent process mid-run and shows it resumes correctly (see below)
+npm run cli -- metrics  # aggregate run stats: escalation rate, tool calls/run, estimated cost, approval turnaround
 npm run typecheck
 ```
 
@@ -78,6 +80,14 @@ most recent `get_property_market_data` call logged for that lead. In a live test
 drafted "under $500k" (echoing the lead's own budget, not a market figure), got rejected by this
 check, read the error, and revised the draft on its own next turn — recorded verbatim in
 `history 1`. That's the self-correction loop working as intended.
+
+That same run surfaced a real bug: the figure extractor parsed "$500k" as the literal number 500
+(dropping the "k"), so it never matched anything and always got rejected, even though 500,000 is a
+reasonable restatement of a grounded figure (it's within 1% of that property's projected next-year
+price). Fixed by normalizing k/K/m/M shorthand and commas into a plain number
+(`parseMoneyToken`/`parsePercentToken` in `src/domain/grounding.ts`) before comparison, with
+regression tests in `src/tests/grounding.test.ts` covering the exact failing case plus adjacent
+shorthand formats -- so this class of bug can't silently reappear.
 
 **`send_message` is mocked.** Real email/SMS integrations are explicitly out of scope. It logs
 `MOCK SEND: <content> to <contact>` into `audit_log` and updates `last_contacted_at` /
@@ -195,19 +205,29 @@ continued grading) will want a key with a normal rate limit. Because of that cap
 were each independently verified correct via the manual runs above (visible in `history <leadId>`
 output) immediately before the eval script was written from the same assertions.
 
+The reliability/locking upgrade round (retry-backoff, idempotent locking, the grounding bugfix) hit
+the same daily cap, so those were verified with `npm run test` instead — deterministic unit tests
+using a stubbed OpenAI client and an isolated in-memory db, which don't need a live key at all. See
+`src/tests/`.
+
 ## What would change at 100× lead volume
 
 - **A real job queue, not a single process.** `getQueue`/`processQueue` (`src/agent/queue.ts`,
-  `src/agent/runQueue.ts`) currently do one linear DB scan and process leads serially in-process.
-  At scale this becomes a proper queue (SQS/BullMQ/etc.) with many workers pulling leads, and
-  `run_state`'s single-row "what am I resuming" design becomes a per-worker lease/heartbeat instead
-  of one global row.
+  `src/agent/runQueue.ts`) currently do one linear DB scan and process leads serially in-process,
+  with a `leads.locked_at`/`locked_by` column (5-minute timeout) preventing two workers from
+  double-processing the same lead. That per-row lock is the right *idea* at any scale, but a single
+  SQLite table doing `UPDATE ... WHERE locked_at IS NULL` is not what you'd want under real
+  concurrent load; it becomes a proper queue (SQS/BullMQ/etc.) with lease/heartbeat semantics per
+  worker, and `run_state`'s single global row becomes per-worker state.
 - **Batched context fetches.** `get_lead_context` does one lead + one interaction-history query
   per call; at volume you'd prefetch/batch these (e.g., load a worker's whole shard of leads'
   contexts in one query) rather than a round trip per lead per tool call.
-- **Rate-limited, budgeted LLM calls.** Right now each run just calls the API and lets errors
-  surface. At volume you'd want a token/request budget per run, backoff+retry on 429s (I hit this
-  personally during development), and probably a cheaper/faster model for routine
+- **Rate-limited, budgeted LLM calls.** `src/agent/loop.ts` now retries 429/5xx with exponential
+  backoff and jitter (3 attempts) and escalates gracefully instead of crashing once retries are
+  exhausted -- the minimum bar, and something I hit personally during development. At real volume
+  you'd add a hard token/cost budget per run (the new `run_metrics` table's
+  `estimated_token_cost` is a first step toward even seeing this), a request-rate limiter shared
+  across workers instead of per-process retry, and probably a cheaper/faster model for routine
   qualification-stage leads with escalation to a stronger model only for ambiguous cases.
 - **SQLite itself.** `node:sqlite` is perfect for a single-process take-home; at 100× volume with
   multiple workers you'd move to Postgres for real concurrent writers (SQLite's single-writer
@@ -229,3 +249,30 @@ output) immediately before the eval script was written from the same assertions.
   loop. No pagination, filtering flags, interactive prompts, etc.
 - **Real send integrations, auth, deployment, RAG/embeddings, multi-agent setups** — all explicitly
   out of scope per the brief; `send_message` is mocked and clearly labeled as such.
+
+## Production readiness
+
+This is a take-home submission demonstrating the required properties, not a system ready to touch
+real leads. In priority order, here's what stands between this and a real launch:
+
+1. **Compliance/consent tracking.** `do_not_contact` is a start, but a real deployment needs
+   audit-grade opt-in/opt-out timestamps (not just a boolean) and legal review of what the model is
+   allowed to say — real estate outreach has genuine TCPA and Fair Housing exposure that a boolean
+   flag doesn't cover.
+2. **Reliability.** Now implemented as the minimum bar before this touches real leads: exponential
+   backoff with jitter on 429/5xx (`createCompletionWithRetry` in `src/agent/loop.ts`, 3 retries,
+   graceful escalation instead of a crash once exhausted) and idempotent per-lead locking
+   (`leads.locked_at`/`locked_by`, 5-minute timeout, `tryAcquireLock`/`releaseLock` in
+   `src/db/queries.ts`) so two workers can't double-process the same lead. Still missing at real
+   scale: a shared rate limiter across workers, not just per-process retry.
+3. **Observability.** The new `run_metrics` table and `metrics` CLI command (total runs, escalation
+   rate, avg tool calls/run, estimated cost, average proposal-approval turnaround) are a first step
+   toward "how is this system actually behaving" beyond the domain audit trail. A real deployment
+   needs proper structured logging, error-rate alerting, and real cost monitoring — this is
+   deliberately just enough structured data to answer the question, not a monitoring stack.
+4. **Incremental rollout.** A real launch would ship "agent drafts, human approves and sends
+   manually" first, measure draft quality and approval rates for a few weeks, and only automate the
+   `send_message` step after that's proven out — not launch propose→approve→send all at once, which
+   is what this take-home necessarily does to demonstrate the full loop in one submission.
+5. The CLI is a stand-in for a real inbox/CRM-integrated interface for the human approval step, not
+   a UI to be built out further.
