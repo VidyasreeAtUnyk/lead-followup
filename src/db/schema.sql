@@ -17,7 +17,9 @@ CREATE TABLE IF NOT EXISTS leads (
   )) DEFAULT 'new',
   do_not_contact INTEGER NOT NULL DEFAULT 0,
   last_contacted_at TEXT,
-  contact_count INTEGER NOT NULL DEFAULT 0
+  contact_count INTEGER NOT NULL DEFAULT 0,
+  locked_at TEXT,
+  locked_by TEXT
 );
 
 CREATE TABLE IF NOT EXISTS interactions (
@@ -74,6 +76,19 @@ CREATE TABLE IF NOT EXISTS run_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   current_lead_id INTEGER,
   updated_at TEXT NOT NULL
+);
+
+-- One row per agent run, for lightweight observability (aggregate stats via
+-- the `metrics` CLI command) -- not a replacement for the domain audit trail
+-- in audit_log, which remains the source of truth for what actually happened.
+CREATE TABLE IF NOT EXISTS run_metrics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lead_id INTEGER NOT NULL,
+  started_at TEXT NOT NULL,
+  ended_at TEXT NOT NULL,
+  outcome TEXT NOT NULL CHECK (outcome IN ('escalated','proposal_created','sent','no_action')),
+  tool_call_count INTEGER NOT NULL,
+  estimated_token_cost REAL NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_interactions_lead ON interactions(lead_id);

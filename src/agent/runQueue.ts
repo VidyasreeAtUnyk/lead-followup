@@ -4,9 +4,13 @@ import { fileURLToPath } from "node:url";
 import { loadEnvFile } from "../config/env.js";
 loadEnvFile();
 import { getDb, DEFAULT_DB_PATH } from "../db/client.js";
-import { getRunState, setRunState } from "../db/queries.js";
+import { getRunState, setRunState, tryAcquireLock, releaseLock } from "../db/queries.js";
 import { getQueue } from "./queue.js";
 import { runAgentForLead, type RunResult } from "./loop.js";
+
+function defaultWorkerId(): string {
+  return `worker-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 /**
  * Processes the queue one lead at a time. All progress markers live in the
@@ -14,25 +18,48 @@ import { runAgentForLead, type RunResult } from "./loop.js";
  * any point, the next invocation reads run_state and resumes the same lead
  * (which itself resumes coherently because every tool call it makes is
  * committed to SQLite immediately; see runAgentForLead).
+ *
+ * Idempotent locking: each lead is locked (leads.locked_at/locked_by) before
+ * processing and released after, so if two workers race for the same lead,
+ * only the one that wins tryAcquireLock proceeds -- the other skips it this
+ * pass rather than double-processing. A lock older than the timeout is
+ * treated as abandoned (crashed worker) and can be re-acquired by anyone.
  */
-export async function processQueue(db: DatabaseSync, client?: OpenAI, only?: number): Promise<RunResult[]> {
+export async function processQueue(
+  db: DatabaseSync,
+  client?: OpenAI,
+  only?: number,
+  workerId: string = defaultWorkerId()
+): Promise<RunResult[]> {
   const results: RunResult[] = [];
 
   const resumeState = getRunState(db);
   if (resumeState?.current_lead_id != null && (only === undefined || only === resumeState.current_lead_id)) {
-    const result = await runAgentForLead(db, resumeState.current_lead_id, client);
-    results.push(result);
-    setRunState(db, null);
+    const leadId = resumeState.current_lead_id;
+    if (tryAcquireLock(db, leadId, workerId)) {
+      try {
+        const result = await runAgentForLead(db, leadId, client);
+        results.push(result);
+      } finally {
+        setRunState(db, null);
+        releaseLock(db, leadId, workerId);
+      }
+    }
   }
 
   const queue = only !== undefined ? getQueue(db).filter((l) => l.id === only) : getQueue(db);
 
   for (const lead of queue) {
     if (results.some((r) => r.leadId === lead.id)) continue;
+    if (!tryAcquireLock(db, lead.id, workerId)) continue; // locked by another worker and not expired -- skip this pass
     setRunState(db, lead.id);
-    const result = await runAgentForLead(db, lead.id, client);
-    results.push(result);
-    setRunState(db, null);
+    try {
+      const result = await runAgentForLead(db, lead.id, client);
+      results.push(result);
+    } finally {
+      setRunState(db, null);
+      releaseLock(db, lead.id, workerId);
+    }
   }
 
   return results;

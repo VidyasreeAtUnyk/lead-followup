@@ -7,6 +7,8 @@ import type {
   Property,
   PropertyPriceHistory,
   Actor,
+  RunMetric,
+  RunOutcomeKind,
 } from "../domain/types.js";
 import { nowIso } from "./client.js";
 
@@ -213,6 +215,65 @@ export function isParkedOnEscalation(db: DatabaseSync, leadId: number): boolean 
   } catch {
     return false;
   }
+}
+
+export function insertRunMetric(
+  db: DatabaseSync,
+  input: {
+    lead_id: number;
+    started_at: string;
+    ended_at: string;
+    outcome: RunOutcomeKind;
+    tool_call_count: number;
+    estimated_token_cost: number;
+  }
+): void {
+  db.prepare(
+    `INSERT INTO run_metrics (lead_id, started_at, ended_at, outcome, tool_call_count, estimated_token_cost)
+     VALUES ($lead_id, $started_at, $ended_at, $outcome, $tool_call_count, $estimated_token_cost)`
+  ).run(
+    bind({
+      $lead_id: input.lead_id,
+      $started_at: input.started_at,
+      $ended_at: input.ended_at,
+      $outcome: input.outcome,
+      $tool_call_count: input.tool_call_count,
+      $estimated_token_cost: input.estimated_token_cost,
+    })
+  );
+}
+
+export function listRunMetrics(db: DatabaseSync): RunMetric[] {
+  return normalizeRows<RunMetric>(db.prepare("SELECT * FROM run_metrics ORDER BY id").all());
+}
+
+const LOCK_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Idempotent locking guardrail: only one worker may hold a lead's lock at a
+ * time. A lock older than LOCK_TIMEOUT_MS is treated as abandoned (the
+ * process that held it presumably crashed) and can be re-acquired by anyone.
+ */
+export function tryAcquireLock(db: DatabaseSync, leadId: number, workerId: string, timeoutMs = LOCK_TIMEOUT_MS): boolean {
+  const lead = getLead(db, leadId);
+  if (!lead) return false;
+
+  if (lead.locked_at && lead.locked_by) {
+    const ageMs = Date.now() - new Date(lead.locked_at).getTime();
+    if (ageMs < timeoutMs) return false; // still held by someone else and not expired
+  }
+
+  db.prepare("UPDATE leads SET locked_at = $now, locked_by = $worker WHERE id = $id").run(
+    bind({ $now: nowIso(), $worker: workerId, $id: leadId })
+  );
+  return true;
+}
+
+/** Only releases the lock if this worker still holds it -- never clears a newer lock it doesn't own. */
+export function releaseLock(db: DatabaseSync, leadId: number, workerId: string): void {
+  db.prepare("UPDATE leads SET locked_at = NULL, locked_by = NULL WHERE id = $id AND locked_by = $worker").run(
+    bind({ $id: leadId, $worker: workerId })
+  );
 }
 
 export function getRunState(db: DatabaseSync): { current_lead_id: number | null } | undefined {

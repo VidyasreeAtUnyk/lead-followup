@@ -43,6 +43,8 @@ export interface Lead {
   do_not_contact: 0 | 1;
   last_contacted_at: string | null;
   contact_count: number;
+  locked_at: string | null;
+  locked_by: string | null;
 }
 
 export interface Interaction {
@@ -89,4 +91,17 @@ export interface PropertyPriceHistory {
   property_id: number;
   year: number;
   avg_price: number;
+}
+
+export const RUN_OUTCOMES = ["escalated", "proposal_created", "sent", "no_action"] as const;
+export type RunOutcomeKind = (typeof RUN_OUTCOMES)[number];
+
+export interface RunMetric {
+  id: number;
+  lead_id: number;
+  started_at: string;
+  ended_at: string;
+  outcome: RunOutcomeKind;
+  tool_call_count: number;
+  estimated_token_cost: number;
 }
