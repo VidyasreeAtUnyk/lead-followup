@@ -32,15 +32,16 @@ function db() {
 
 program
   .command("dashboard")
-  .description("Show all leads with segment, stage, last contact, and pending proposal count")
+  .description("Show all leads with segment, stage, last contact, pending proposals, and escalation status")
   .action(() => {
     const database = db();
     const leads = listLeads(database);
     const table = new Table({
-      head: ["ID", "Name", "Segment", "Stage", "Last Contacted", "Pending Proposals"],
+      head: ["ID", "Name", "Segment", "Stage", "Last Contacted", "Pending Proposals", "Escalated"],
     });
     for (const lead of leads) {
       const pending = listProposals(database, { lead_id: lead.id, status: "pending" }).length;
+      const parked = isParkedOnEscalation(database, lead.id);
       table.push([
         lead.id,
         lead.name,
@@ -48,6 +49,7 @@ program
         colorStage(lead.stage, Boolean(lead.do_not_contact)),
         formatTimestamp(lead.last_contacted_at),
         pending > 0 ? chalk.bold(String(pending)) : "0",
+        parked ? chalk.red("yes -- needs retry") : chalk.dim("no"),
       ]);
     }
     console.log(table.toString());
