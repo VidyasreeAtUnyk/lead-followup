@@ -2,7 +2,8 @@ import { z } from "zod";
 import type { ToolDefinition } from "./types.js";
 import { getLead, countSendsInWindow } from "../db/queries.js";
 import { ToolError } from "../domain/errors.js";
-import { canReactivateFrom, CONTACT_WINDOW_DAYS, MAX_SENDS_IN_WINDOW } from "../domain/stateMachine.js";
+import { canReactivateFrom } from "../domain/stateMachine.js";
+import { CONTACT_WINDOW_DAYS, MAX_SENDS_IN_WINDOW } from "../config/limits.js";
 
 const schema = z.object({
   lead_id: z.number().int().positive(),

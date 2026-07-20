@@ -133,6 +133,13 @@ triggers it.
 The brief requires guardrails to live in code beneath the model, not in prompt text the model
 could ignore. Concretely:
 
+Every tunable number behind these rules — the contact-frequency window and cap, the reactivation
+evidence freshness window, plus the agent loop's own operational knobs (turn cap, retry count,
+backoff, lock timeout) — lives in one file, `src/config/limits.ts`, each with a comment on *why*
+that value. The guardrail logic itself stays where it's enforced (`src/domain/stateMachine.ts`,
+`src/tools/*.ts`); only the actual numbers were pulled out, so "what are our limits" is one file to
+read instead of a hunt across modules.
+
 1. **Hard prohibition — never contact without an approved proposal, never contact `do_not_contact`.**
    - `send_message` (`src/tools/sendMessage.ts`) checks `proposal.status === 'approved'` and
      `lead.do_not_contact` *independently*, before doing anything else, regardless of how it was
@@ -166,7 +173,7 @@ could ignore. Concretely:
 
 3. **Contact-frequency cap.** `send_message` independently queries `countSendsInWindow` (a rolling
    14-day window, cap of 3 successful sends, `src/db/queries.ts` + constants in
-   `src/domain/stateMachine.ts`) before allowing another send, no matter what the model's plan was.
+   `src/config/limits.ts`) before allowing another send, no matter what the model's plan was.
 
 4. **(Stretch) Numeric grounding**, described above — implemented because it directly targets a
    realistic failure mode (a model narrating a plausible-sounding but fabricated price) and was

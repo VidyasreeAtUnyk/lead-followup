@@ -6,15 +6,18 @@ import { dispatchToolCall } from "../tools/index.js";
 import { getLead, insertRunMetric } from "../db/queries.js";
 import { nowIso } from "../db/client.js";
 import type { RunOutcomeKind } from "../domain/types.js";
+import {
+  DEFAULT_MODEL,
+  MAX_ASSISTANT_TURNS,
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_BASE_DELAY_MS,
+  MAX_WORTHWHILE_RETRY_AFTER_SECONDS,
+  ESTIMATED_COST_PER_TOKEN,
+} from "../config/limits.js";
+
+export { DEFAULT_MODEL };
 
 const TERMINAL_TOOLS = new Set(["propose_message", "propose_viewing", "send_message", "escalate_to_agent"]);
-export const DEFAULT_MODEL = process.env.OPENAI_MODEL ?? "gpt-5.4-mini";
-const MAX_ASSISTANT_TURNS = 8;
-const DEFAULT_MAX_RETRIES = 3;
-const DEFAULT_BASE_DELAY_MS = 1000;
-// Rough blended estimate, not real pricing -- good enough to compare run cost
-// relatively (e.g. "this run cost 3x that one"), not to reconcile a bill.
-const ESTIMATED_COST_PER_TOKEN = 0.0000005;
 
 export interface RetryOptions {
   maxRetries?: number;
@@ -28,13 +31,6 @@ function sleep(ms: number): Promise<void> {
 function isRetryableStatus(status: unknown): boolean {
   return status === 429 || (typeof status === "number" && status >= 500 && status < 600);
 }
-
-// If the API tells us how long to wait and it's longer than this, no amount
-// of in-process backoff will make the retry succeed before the caller gives
-// up anyway (e.g. a daily quota that resets in 20+ minutes, not 10 seconds).
-// Retrying anyway just burns more requests against the same exhausted quota
-// for zero chance of success -- fail fast instead.
-const MAX_WORTHWHILE_RETRY_AFTER_SECONDS = 30;
 
 function retryAfterSeconds(e: unknown): number | null {
   const headers = (e as { headers?: Record<string, string> })?.headers;

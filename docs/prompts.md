@@ -425,3 +425,28 @@ turns to reach the same correct decision, which could quietly undo that earlier 
 that actually matters (requests/day, the harder daily cap) while chasing a softer one (tokens/min,
 which regenerates continuously). Recorded here as a reasoned pass, not an oversight: this is a real
 lever for a production system at real volume, and out of scope for what this submission needs.
+
+## Entry 23 — Consolidating every limit into one config file
+
+Asked directly: were the guardrail limits (contact cap, reactivation window) collected in one place,
+and could the system be organized the way an org actually would -- one file where every tunable
+threshold lives, not scattered across whichever module happens to enforce it. Audited the whole
+codebase for `const NAME = value`-shaped constants first rather than assuming: the guardrail limits
+were already together in `src/domain/stateMachine.ts` (`CONTACT_WINDOW_DAYS`, `MAX_SENDS_IN_WINDOW`,
+`MAX_UNANSWERED_ATTEMPTS`, `REACTIVATION_EVIDENCE_MAX_AGE_DAYS`, `REACTIVATION_EVIDENCE_TYPES`), but
+the operational tuning knobs were not -- `MAX_ASSISTANT_TURNS`, retry count/backoff, the
+worthwhile-retry-after threshold, and the cost-per-token estimate all lived inside `loop.ts`, and the
+lock timeout lived inside `queries.ts`.
+
+Created `src/config/limits.ts` as the single source of truth for both categories, grouped by what
+governs which behavior with a comment on *why* each value, not just what it's called. Moved
+(not duplicated) every constant there: `stateMachine.ts` now imports `MAX_UNANSWERED_ATTEMPTS` for
+its own internal use; the three tool files that previously pulled `CONTACT_WINDOW_DAYS` /
+`MAX_SENDS_IN_WINDOW` / `REACTIVATION_EVIDENCE_*` off `stateMachine.ts` now import them directly from
+`config/limits.ts` instead (while still importing the actual guardrail *functions* --
+`canReactivateFrom`, `nextStageAfterMessageSend`, etc. -- from `stateMachine.ts`, since those stay
+where they're enforced); `loop.ts` imports its five operational constants and re-exports
+`DEFAULT_MODEL` so `cli/index.ts`'s existing import didn't need to change; `queries.ts` imports
+`LOCK_TIMEOUT_MS`. Verified nothing was left duplicated with a repo-wide grep for each constant name
+outside the new file. `tsc --noEmit` clean, 26/26 unit tests still pass unchanged -- this was a pure
+reorganization, no behavior changed anywhere.

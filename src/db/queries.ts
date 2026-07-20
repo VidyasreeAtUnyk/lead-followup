@@ -11,6 +11,7 @@ import type {
   RunOutcomeKind,
 } from "../domain/types.js";
 import { nowIso } from "./client.js";
+import { LOCK_TIMEOUT_MS } from "../config/limits.js";
 
 // node:sqlite's TS types don't export SQLInputValue/SQLOutputValue, so we
 // bind params as `any` at the call boundary here and cast rows back to our
@@ -268,8 +269,6 @@ export function insertRunMetric(
 export function listRunMetrics(db: DatabaseSync): RunMetric[] {
   return normalizeRows<RunMetric>(db.prepare("SELECT * FROM run_metrics ORDER BY id").all());
 }
-
-const LOCK_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
  * Idempotent locking guardrail: only one worker may hold a lead's lock at a
