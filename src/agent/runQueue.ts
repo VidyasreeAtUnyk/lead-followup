@@ -92,9 +92,17 @@ async function main() {
     onLeadResult: (result) => {
       console.log(`Lead ${result.leadId}: ${result.outcome.kind} (${result.assistantTurns} turn(s))`);
       const info = result.rateLimitInfo;
-      if (info && (info.remainingRequests !== undefined || info.limitRequests !== undefined)) {
-        const reset = info.resetRequests ? `, resets in ${info.resetRequests}` : "";
-        console.log(`  Quota: ${info.remainingRequests ?? "?"}/${info.limitRequests ?? "?"} requests remaining${reset}`);
+      // Requests/day and tokens/min are independent OpenAI limits -- a run
+      // can be blocked by one while the other looks fine, so both are
+      // reported rather than just requests (see printRateLimitInfo in
+      // src/cli/index.ts for the fuller version of this reasoning).
+      if (info?.remainingRequests !== undefined || info?.limitRequests !== undefined) {
+        const reset = info?.resetRequests ? `, resets in ${info.resetRequests}` : "";
+        console.log(`  Quota (requests/day): ${info?.remainingRequests ?? "?"}/${info?.limitRequests ?? "?"} remaining${reset}`);
+      }
+      if (info?.remainingTokens !== undefined || info?.limitTokens !== undefined) {
+        const reset = info?.resetTokens ? `, resets in ${info.resetTokens}` : "";
+        console.log(`  Quota (tokens/min): ${info?.remainingTokens ?? "?"}/${info?.limitTokens ?? "?"} remaining${reset}`);
       }
     },
   });

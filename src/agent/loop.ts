@@ -44,11 +44,21 @@ function retryAfterSeconds(e: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** Snapshot of the API's own rate-limit accounting, captured off response headers. */
+/**
+ * Snapshot of the API's own rate-limit accounting, captured off response
+ * headers. OpenAI enforces *both* of these independently and simultaneously
+ * -- a request only succeeds if it satisfies every dimension, so having
+ * plenty of requests left says nothing about whether the token bucket for
+ * the current minute is also clear. Reporting only one (as this used to)
+ * gives a falsely reassuring picture; both are captured and shown together.
+ */
 export interface RateLimitInfo {
   limitRequests?: number;
   remainingRequests?: number;
   resetRequests?: string;
+  limitTokens?: number;
+  remainingTokens?: number;
+  resetTokens?: string;
   capturedAt: string;
 }
 
@@ -70,11 +80,20 @@ export function extractRateLimitInfo(headers: unknown): RateLimitInfo | undefine
   const limit = getHeaderValue(headers, "x-ratelimit-limit-requests");
   const remaining = getHeaderValue(headers, "x-ratelimit-remaining-requests");
   const reset = getHeaderValue(headers, "x-ratelimit-reset-requests");
-  if (limit === null && remaining === null && reset === null) return undefined;
+  const limitTok = getHeaderValue(headers, "x-ratelimit-limit-tokens");
+  const remainingTok = getHeaderValue(headers, "x-ratelimit-remaining-tokens");
+  const resetTok = getHeaderValue(headers, "x-ratelimit-reset-tokens");
+  if (
+    limit === null && remaining === null && reset === null &&
+    limitTok === null && remainingTok === null && resetTok === null
+  ) return undefined;
   return {
     limitRequests: limit !== null ? Number(limit) : undefined,
     remainingRequests: remaining !== null ? Number(remaining) : undefined,
     resetRequests: reset ?? undefined,
+    limitTokens: limitTok !== null ? Number(limitTok) : undefined,
+    remainingTokens: remainingTok !== null ? Number(remainingTok) : undefined,
+    resetTokens: resetTok ?? undefined,
     capturedAt: nowIso(),
   };
 }

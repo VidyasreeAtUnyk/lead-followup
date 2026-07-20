@@ -318,8 +318,12 @@ lead this time. `docs/prompts.md` (Entry 13) has the full trail.
 
   `RunResult` also now carries `rateLimitInfo` -- OpenAI's own `x-ratelimit-*` response headers,
   captured via the SDK's `.withResponse()` on both successful and failed calls, not an estimate.
-  `cli process` and the standalone `runQueue.ts` script print `X/Y requests remaining` after every
-  lead so it's visible in real time how much of the daily budget is left, without a separate command.
+  It captures *both* rate-limit dimensions OpenAI enforces independently: requests/day and
+  tokens/minute. These are genuinely separate buckets -- a call can be blocked by a nearly-exhausted
+  token bucket while the request count still looks perfectly healthy (this happened live during
+  testing: 22/50 requests remaining, but 429'd anyway on a TPM cap at 444/100000 tokens). `cli
+  process`, `cli quota`, and the standalone `runQueue.ts` script print both lines after every lead
+  so neither one hides behind the other.
 
   At real volume you'd still want a hard token/cost budget per run (the `run_metrics` table's
   `estimated_token_cost` is a first step toward even seeing this), a request-rate limiter shared

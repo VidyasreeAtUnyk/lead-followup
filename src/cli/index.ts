@@ -236,15 +236,36 @@ program
  * call (see RateLimitInfo in src/agent/loop.ts) -- real numbers from the API
  * itself, not an estimate. Printed after each lead in `process`, and
  * standalone via `quota` below.
+ *
+ * Prints requests-per-day and tokens-per-minute separately: OpenAI enforces
+ * both independently, so a run can be blocked by TPM pressure while RPD
+ * still looks fine (and vice versa) -- showing only one, as this used to,
+ * can read as "plenty left" while the actual blocker is invisible.
  */
 function printRateLimitInfo(info: RunResult["rateLimitInfo"]): void {
-  if (!info || (info.remainingRequests === undefined && info.limitRequests === undefined)) return;
-  const remaining = info.remainingRequests ?? "?";
-  const limit = info.limitRequests ?? "?";
-  const reset = info.resetRequests ? `, resets in ${info.resetRequests}` : "";
-  const low = typeof info.remainingRequests === "number" && info.remainingRequests <= 5;
-  const line = `  Quota: ${remaining}/${limit} requests remaining${reset}`;
-  console.log(low ? chalk.red(line) : chalk.dim(line));
+  if (!info) return;
+
+  if (info.remainingRequests !== undefined || info.limitRequests !== undefined) {
+    const remaining = info.remainingRequests ?? "?";
+    const limit = info.limitRequests ?? "?";
+    const reset = info.resetRequests ? `, resets in ${info.resetRequests}` : "";
+    const low = typeof info.remainingRequests === "number" && info.remainingRequests <= 5;
+    const line = `  Quota (requests/day): ${remaining}/${limit} remaining${reset}`;
+    console.log(low ? chalk.red(line) : chalk.dim(line));
+  }
+
+  if (info.remainingTokens !== undefined || info.limitTokens !== undefined) {
+    const remaining = info.remainingTokens ?? "?";
+    const limit = info.limitTokens ?? "?";
+    const reset = info.resetTokens ? `, resets in ${info.resetTokens}` : "";
+    const low =
+      typeof info.remainingTokens === "number" &&
+      typeof info.limitTokens === "number" &&
+      info.limitTokens > 0 &&
+      info.remainingTokens / info.limitTokens <= 0.05;
+    const line = `  Quota (tokens/min): ${remaining}/${limit} remaining${reset}`;
+    console.log(low ? chalk.red(line) : chalk.dim(line));
+  }
 }
 
 program

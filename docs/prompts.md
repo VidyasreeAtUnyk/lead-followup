@@ -384,3 +384,24 @@ about it in the abstract:
 
 Both fixes cost a real request each to discover -- an acceptable, small trade for shipping a command
 whose entire purpose is telling the truth about quota, verified rather than assumed to work.
+
+## Entry 21 — Quota reporting was only telling half the truth
+
+Live evidence surfaced this directly: `cli quota` reported "22/50 requests remaining," then the very
+next `cli process` call escalated with a 429 whose message read "tokens per min (TPM): Limit 100000,
+Used 99556" -- a completely healthy request count next to an almost-exhausted token bucket. These
+looked contradictory but aren't: OpenAI enforces requests/day and tokens/minute as two independent
+buckets, and a call only succeeds if it clears both. `extractRateLimitInfo` (`src/agent/loop.ts`) was
+only ever reading the `x-ratelimit-*-requests` headers, never `x-ratelimit-*-tokens` -- so every
+quota line this system had printed all session was giving a technically-true but incomplete picture,
+one that read as reassuring right up until the moment a request failed for a reason it couldn't see
+coming.
+
+Fixed by extending `RateLimitInfo` with `limitTokens`/`remainingTokens`/`resetTokens`, extracted
+alongside the existing requests fields in the same function, and printed as a second, independent
+line everywhere the first one was already showing (`cli process`, `cli quota`, `runQueue.ts`) -- each
+flagged red on its own threshold (absolute <=5 for requests, since limits vary less there; relative
+<=5% for tokens, since limits scale by orders of magnitude across tiers). Added a regression test
+reproducing the exact live scenario (22/50 requests, 444/100000 tokens) to make sure a healthy request
+count can never again quietly stand in for the whole picture. Verified against the live key
+afterward: `cli quota` now prints both lines, and the token one was the one actually near zero.
