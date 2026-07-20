@@ -20,6 +20,7 @@ import {
 import { colorStage, truncate, formatTimestamp } from "./format.js";
 import { RunProgressRenderer } from "./progress.js";
 import { processQueue } from "../agent/runQueue.js";
+import type { RunResult } from "../agent/loop.js";
 import { closeDeal, type DealOutcome } from "../domain/dealClose.js";
 import { isToolError } from "../domain/errors.js";
 import { computeAggregateMetrics } from "../domain/metrics.js";
@@ -219,6 +220,7 @@ program
         );
         renderer = null;
         activeLeadId = null;
+        printRateLimitInfo(result.rateLimitInfo);
       },
     });
 
@@ -226,6 +228,25 @@ program
       console.log(chalk.dim("Queue is empty -- nothing to process."));
     }
   });
+
+/**
+ * Real quota numbers off the provider's own response, captured after every
+ * model call (see RateLimitInfo in src/agent/loop.ts) -- not an estimate.
+ * OpenAI reports this on every call (success or failure). Gemini only
+ * surfaces it inside a 429 error's message, and only best-effort, so on
+ * Gemini this often prints nothing at all -- that's an honest "unknown," not
+ * a bug. Printed after each lead so it's obvious how much of the daily
+ * budget is left without needing a separate command.
+ */
+function printRateLimitInfo(info: RunResult["rateLimitInfo"]): void {
+  if (!info || (info.remainingRequests === undefined && info.limitRequests === undefined)) return;
+  const remaining = info.remainingRequests ?? "?";
+  const limit = info.limitRequests ?? "?";
+  const reset = info.resetRequests ? `, resets in ${info.resetRequests}` : "";
+  const low = typeof info.remainingRequests === "number" && info.remainingRequests <= 5;
+  const line = `  Quota: ${remaining}/${limit} requests remaining${reset}`;
+  console.log(low ? chalk.red(line) : chalk.dim(line));
+}
 
 function sleepInterruptible(ms: number, stopSignal: { stopped: boolean }): Promise<void> {
   return new Promise((resolve) => {
@@ -279,6 +300,7 @@ program
           );
           renderer = null;
           activeLeadId = null;
+          printRateLimitInfo(result.rateLimitInfo);
         },
       });
 

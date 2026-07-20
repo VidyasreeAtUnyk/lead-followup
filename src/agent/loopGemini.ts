@@ -6,7 +6,7 @@ import { dispatchToolCall } from "../tools/index.js";
 import { getLead, insertRunMetric } from "../db/queries.js";
 import { nowIso } from "../db/client.js";
 import type { RunOutcomeKind } from "../domain/types.js";
-import type { RunResult, RunOutcome, ProgressCallback, RetryOptions } from "./loop.js";
+import type { RunResult, RunOutcome, ProgressCallback, RetryOptions, RateLimitInfo } from "./loop.js";
 
 /**
  * Gemini equivalent of runAgentForLead (src/agent/loop.ts). Experiment-branch
@@ -34,6 +34,34 @@ function isRetryableStatus(status: unknown): boolean {
   return status === 429 || (typeof status === "number" && status >= 500 && status < 600);
 }
 
+/**
+ * Best-effort quota info for Gemini. Unlike OpenAI, the Gemini SDK exposes no
+ * x-ratelimit-* headers on a successful response -- there is nothing to
+ * capture on the happy path, full stop. The only place quota numbers show up
+ * at all is inside a RESOURCE_EXHAUSTED (429) error's message text (a raw
+ * JSON blob embedded in the string), so this only ever returns something on
+ * that failure path, and only when the fields it looks for are actually
+ * present. A miss returns undefined rather than a fabricated guess -- callers
+ * must treat an absent RateLimitInfo as "unknown," not "quota is fine."
+ */
+function extractGeminiQuotaInfo(e: unknown): RateLimitInfo | undefined {
+  const message = e instanceof Error ? e.message : typeof e === "string" ? e : "";
+  const quotaMatch = message.match(/"quotaValue"\s*:\s*"(\d+)"/);
+  const retryDelayMatch = message.match(/"retryDelay"\s*:\s*"([^"]+)"/);
+  const isExhausted = /RESOURCE_EXHAUSTED/.test(message);
+  if (!isExhausted && !quotaMatch) return undefined;
+  if (!quotaMatch && !retryDelayMatch) return undefined;
+  return {
+    limitRequests: quotaMatch ? Number(quotaMatch[1]) : undefined,
+    // RESOURCE_EXHAUSTED means the bucket that tripped is at 0 right now --
+    // this doesn't tell us which bucket (per-minute vs. per-day), only that
+    // whichever one fired is exhausted.
+    remainingRequests: isExhausted ? 0 : undefined,
+    resetRequests: retryDelayMatch ? retryDelayMatch[1] : undefined,
+    capturedAt: nowIso(),
+  };
+}
+
 function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -45,7 +73,8 @@ function getGeminiClient(): GoogleGenAI {
 async function generateWithRetry(
   ai: GoogleGenAI,
   params: { model: string; contents: Content[]; config: Record<string, unknown> },
-  opts: RetryOptions
+  opts: RetryOptions,
+  onRateLimitInfo?: (info: RateLimitInfo) => void
 ) {
   const maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
   const baseDelayMs = opts.baseDelayMs ?? DEFAULT_BASE_DELAY_MS;
@@ -57,6 +86,8 @@ async function generateWithRetry(
       return await ai.models.generateContent(params as any);
     } catch (e) {
       lastError = e;
+      const info = extractGeminiQuotaInfo(e);
+      if (info) onRateLimitInfo?.(info);
       const status = (e as { status?: unknown })?.status;
       if (!isRetryableStatus(status) || attempt === maxRetries) throw e;
       const backoff = baseDelayMs * 2 ** attempt;
@@ -80,6 +111,7 @@ export async function runAgentForLeadGemini(
   const startedAt = nowIso();
   let toolCallCount = 0;
   let totalTokens = 0;
+  let lastRateLimitInfo: RateLimitInfo | undefined;
 
   function finish(outcome: RunOutcome, turns: number): RunResult {
     const outcomeToMetric: Record<RunOutcome["kind"], RunOutcomeKind> = {
@@ -96,7 +128,7 @@ export async function runAgentForLeadGemini(
       tool_call_count: toolCallCount,
       estimated_token_cost: totalTokens * ESTIMATED_COST_PER_TOKEN,
     });
-    return { leadId, outcome, assistantTurns: turns };
+    return { leadId, outcome, assistantTurns: turns, rateLimitInfo: lastRateLimitInfo };
   }
 
   const contents: Content[] = [{ role: "user", parts: [{ text: buildUserTurn(leadId) }] }];
@@ -121,7 +153,10 @@ export async function runAgentForLeadGemini(
             automaticFunctionCalling: { disable: true },
           },
         },
-        retryOpts
+        retryOpts,
+        (info) => {
+          lastRateLimitInfo = info;
+        }
       );
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

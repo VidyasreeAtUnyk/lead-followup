@@ -305,3 +305,32 @@ good default to enforce in code, not just avoid by discipline.
 Verified live end-to-end after the fixes: happy-path propose→approve→send (Alice) and the
 do-not-contact guardrail (Bob) both worked identically to the OpenAI path -- same tools, same
 enforcement, same audit trail shape. All 23 unit tests pass (22 prior + the new regression test).
+
+## Entry 18 — Porting the request-count optimization to this branch
+
+Ported the same request-reduction work done on `main` (see main's docs/prompts.md Entry 17) over
+here, since both providers share the same daily-request bottleneck. The prompt rewrite
+(`prompts.ts`) is provider-agnostic -- `buildSystemPrompt()` is called by both `loop.ts` and
+`loopGemini.ts` -- so copying it over batches independent reads (get_lead_context,
+check_contact_eligibility, find_matching_properties) into one turn and de-emphasizes log_note for
+both providers at once, with no Gemini-specific prompt changes needed.
+
+The quota-reporting side needed a genuinely different treatment per provider, though, not a
+copy-paste. OpenAI's `RateLimitInfo` capture (via `.withResponse()` and x-ratelimit-* headers)
+ported directly into `runAgentForLeadOpenAI` -- same mechanism as main, just inside this branch's
+dispatcher split. Gemini has no equivalent: its SDK doesn't expose rate-limit headers on a
+successful response at all, only sometimes inside a RESOURCE_EXHAUSTED (429) error's message text
+(a `quotaValue` and `retryDelay` embedded in a raw JSON blob within the string). Rather than fake
+parity with OpenAI's reporting, `loopGemini.ts` now has a separate `extractGeminiQuotaInfo()` that
+only ever returns something on that failure path, and only when the fields it's looking for are
+actually present in the message -- a miss returns `undefined`, not a guess. Concretely: on Gemini,
+`cli process` will usually print nothing after a successful run (no data exists to print) and will
+print a partial quota line only after an actual 429. This asymmetry is real, not an oversight worth
+"fixing" -- forcing a number out of an API that doesn't give you one would be worse than admitting
+it's unknown.
+
+Also re-applied the `.withResponse()` stub-client fix from main's Entry 17 to this branch's test
+files (`retry.test.ts`, `progress.test.ts`, `escalation.test.ts`), which still had the old
+bare-Promise `create()` shape -- same latent bug, not yet triggered here because this branch didn't
+have any code calling `.withResponse()` before this change. Ported the two new rate-limit-capture
+regression tests too. All 25/25 unit tests pass (23 prior + 2 new), `tsc --noEmit` clean.

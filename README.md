@@ -51,7 +51,8 @@ npm run cli -- history 1    # full audit trail for lead 1
 
 `npm run cli -- process` (no id) drains the whole queue, one lead at a time, showing a live spinner
 (elapsed time, tokens so far) that's replaced by a permanent line each time a tool call resolves —
-see `src/cli/progress.ts`.
+see `src/cli/progress.ts` — followed by the provider's real remaining-requests count for that day
+where available (always on OpenAI; best-effort on Gemini, see the note below).
 `npm run cli -- close <leadId> <won|lost|canceled>` is the human action that records a
 closed deal (see "Why there's no `close_deal` tool" below).
 `npm run cli -- retry <leadId>` is the human action that un-parks a lead stuck on an escalation
@@ -317,21 +318,38 @@ lead this time. `docs/prompts.md` (Entry 13) has the full trail.
 - **Batched context fetches.** `get_lead_context` does one lead + one interaction-history query
   per call; at volume you'd prefetch/batch these (e.g., load a worker's whole shard of leads'
   contexts in one query) rather than a round trip per lead per tool call.
-- **Rate-limited, budgeted LLM calls.** `src/agent/loop.ts` now retries 429/5xx with exponential
-  backoff and jitter (3 attempts), fails fast with zero retries when the response's `retry-after`
-  is too long to be worth waiting for (a daily-quota-scale wait vs. a brief per-minute one -- no
-  point burning more requests against a quota that's already exhausted for the day), and escalates
-  gracefully instead of crashing once retries are exhausted -- the minimum bar, and something I hit
-  personally during development against a real 50-request/day account. The system prompt also
-  nudges the model to batch independent read-only tool calls (`get_lead_context`,
-  `check_contact_eligibility`, `find_matching_properties`, `get_property_market_data`) into a single
-  turn rather than one at a time, since each turn is a full request regardless of how many tool
-  calls it contains -- a real lever for requests-per-run, since a rate limit like this one caps
-  *requests*, not tokens. At real volume you'd still want a hard token/cost budget per run (the new
-  `run_metrics` table's `estimated_token_cost` is a first step toward even seeing this), a
-  request-rate limiter shared across workers instead of per-process retry, and probably a
-  cheaper/faster model for routine qualification-stage leads with escalation to a stronger model
-  only for ambiguous cases.
+- **Rate-limited, budgeted LLM calls.** `src/agent/loop.ts` (and `loopGemini.ts`) retry 429/5xx with
+  exponential backoff and jitter (3 attempts), fail fast with zero retries when the response's
+  `retry-after` is too long to be worth waiting for (a daily-quota-scale wait vs. a brief per-minute
+  one -- no point burning more requests against a quota that's already exhausted for the day), and
+  escalate gracefully instead of crashing once retries are exhausted -- the minimum bar, and
+  something I hit personally during development against both a real 50-request/day OpenAI account
+  and Gemini's free-tier daily cap.
+
+  Since a limit like this is on *requests* (turns), not tokens, the biggest lever turned out to be
+  turn count per run, not token usage. The system prompt (`src/agent/prompts.ts`, shared by both
+  providers) tells the model to check `do_not_contact` immediately in its first turn before anything
+  else, and to batch `check_contact_eligibility`, `find_matching_properties`, and
+  `get_property_market_data` together with other independent reads in a single turn rather than one
+  at a time -- it's the same one request whether the model asks for one tool or several. `log_note`,
+  which was previously encouraged "liberally," is now scoped to genuinely non-obvious reasoning, not
+  a routine step, since it costs a full turn like any other call. Together these cut a typical
+  happy-path run from ~5 turns to ~3, for both providers.
+
+  `RunResult` also carries `rateLimitInfo`. On OpenAI this is real: the SDK's `.withResponse()`
+  exposes `x-ratelimit-*` response headers on both successful and failed calls, so `cli process`
+  (and `watch`, and the standalone `runQueue.ts` script) print `X/Y requests remaining` after every
+  lead, straight off the API. Gemini has no equivalent on success -- there is no header to read --
+  so its `rateLimitInfo` only ever gets populated from parsing a 429 error's message text
+  (`loopGemini.ts`'s `extractGeminiQuotaInfo`), and even then only the fields actually present in
+  that message. In practice: on Gemini you'll usually see no quota line after a successful run and a
+  partial one after a real 429. That's an honest gap, not a bug to paper over with a fabricated
+  number.
+
+  At real volume you'd still want a hard token/cost budget per run (the `run_metrics` table's
+  `estimated_token_cost` is a first step toward even seeing this), a request-rate limiter shared
+  across workers instead of per-process retry, and probably a cheaper/faster model for routine
+  qualification-stage leads with escalation to a stronger model only for ambiguous cases.
 - **SQLite itself.** `node:sqlite` is perfect for a single-process take-home; at 100× volume with
   multiple workers you'd move to Postgres for real concurrent writers (SQLite's single-writer
   model would become the bottleneck), keeping the same schema and guardrail logic almost verbatim
