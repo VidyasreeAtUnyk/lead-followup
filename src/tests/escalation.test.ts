@@ -12,16 +12,20 @@ function seedMinimalLead(db: ReturnType<typeof createTestDb>, id: number): void 
   ).run({ $id: id } as never);
 }
 
+// createCompletionWithRetry always calls .create(params).withResponse() --
+// see the equivalent comment in retry.test.ts for why this shape matters.
 function makeThrowingClient(status: number, headers?: Record<string, string>): OpenAI {
   return {
     chat: {
       completions: {
-        create: async () => {
-          const err = new Error("simulated failure") as Error & { status: number; headers?: Record<string, string> };
-          err.status = status;
-          err.headers = headers;
-          throw err;
-        },
+        create: () => ({
+          withResponse: async () => {
+            const err = new Error("simulated failure") as Error & { status: number; headers?: Record<string, string> };
+            err.status = status;
+            err.headers = headers;
+            throw err;
+          },
+        }),
       },
     },
   } as unknown as OpenAI;

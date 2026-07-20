@@ -14,32 +14,43 @@ interface ScriptedTurn {
   toolCalls: { name: string; args: Record<string, unknown> }[];
 }
 
-/** A scripted client that returns a fixed sequence of tool calls, each "costing" 100 tokens. */
+/**
+ * A scripted client that returns a fixed sequence of tool calls, each
+ * "costing" 100 tokens. createCompletionWithRetry always calls
+ * .create(params).withResponse(), matching the real SDK's APIPromise shape --
+ * this stub implements that chain (with an empty headers object, since these
+ * tests aren't exercising rate-limit capture) rather than a bare Promise.
+ */
 function makeScriptedClient(turns: ScriptedTurn[]): OpenAI {
   let callIndex = 0;
   return {
     chat: {
       completions: {
-        create: async () => {
-          const turn = turns[callIndex];
-          callIndex += 1;
-          return {
-            choices: [
-              {
-                message: {
-                  role: "assistant",
-                  content: null,
-                  tool_calls: turn.toolCalls.map((tc, i) => ({
-                    id: `call_${callIndex}_${i}`,
-                    type: "function",
-                    function: { name: tc.name, arguments: JSON.stringify(tc.args) },
-                  })),
-                },
+        create: () => ({
+          withResponse: async () => {
+            const turn = turns[callIndex];
+            callIndex += 1;
+            return {
+              data: {
+                choices: [
+                  {
+                    message: {
+                      role: "assistant",
+                      content: null,
+                      tool_calls: turn.toolCalls.map((tc, i) => ({
+                        id: `call_${callIndex}_${i}`,
+                        type: "function",
+                        function: { name: tc.name, arguments: JSON.stringify(tc.args) },
+                      })),
+                    },
+                  },
+                ],
+                usage: { total_tokens: 100, prompt_tokens: 80, completion_tokens: 20 },
               },
-            ],
-            usage: { total_tokens: 100, prompt_tokens: 80, completion_tokens: 20 },
-          };
-        },
+              response: { headers: { get: () => null } },
+            };
+          },
+        }),
       },
     },
   } as unknown as OpenAI;

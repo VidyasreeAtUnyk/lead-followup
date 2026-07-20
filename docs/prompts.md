@@ -256,3 +256,44 @@ real inconsistency regardless of whether each piece is individually "correct." F
 `Status` column so `parked` and `transient` are still visually distinct within the list. Two
 commands sharing a name should share a definition, even when the narrower one seemed more useful
 in isolation.
+
+## Entry 17 — Request-count optimization + real quota reporting
+
+Asked to optimize request usage directly (not just handle failures gracefully) and to surface
+remaining quota after each run, after repeatedly hitting the 50/day cap during testing. Traced
+where requests actually go: each assistant *turn* is one request regardless of how many tool calls
+it contains, and a typical happy-path run was taking ~5 turns (get_lead_context alone, then
+check_contact_eligibility + find_matching_properties together, then get_property_market_data, then
+log_note, then propose_message) -- most of that sequential separation wasn't necessary.
+
+Rewrote the prompt's priority ordering (`prompts.ts`) around this: get_lead_context,
+check_contact_eligibility, and find_matching_properties all only need the lead_id already known
+from the instruction and don't depend on each other, so the model is now told to request all three
+in its very first turn, always, since it costs the same one request whether it asks for one tool or
+three. get_property_market_data still can't move earlier (it genuinely needs find_matching_properties's
+property_id first), but the prompt now tells the model it can combine that call with the terminal
+propose_message/propose_viewing in the same later turn -- with an explicit note that call order
+within a turn matters, since propose_message's numeric-grounding check only sees a
+get_property_market_data result that already ran. Also de-emphasized log_note, which was previously
+"use liberally": it costs a full turn like anything else, so it's now scoped to genuinely non-obvious
+reasoning (e.g. right before an ambiguous escalation) rather than a routine step. Net effect: a
+typical propose-only run should drop from ~5 turns to ~3.
+
+For visibility: added RateLimitInfo, capturing OpenAI's real x-ratelimit-* response headers via the
+SDK's .withResponse() (works on both success and thrown-error paths, confirmed by reading the SDK's
+own type definitions rather than guessing at the API surface) into RunResult.rateLimitInfo. cli
+process and the standalone runQueue.ts script print "X/Y requests remaining" after every lead --
+real numbers from the API itself, not an estimate.
+
+This surfaced a real test-hygiene issue: every stub OpenAI client across the test suite mimicked the
+old direct-await shape (`create()` returning a plain Promise), but the production code now always
+calls `.create(params).withResponse()` -- a chainable method that a bare Promise doesn't have. The
+retry tests kept "passing" anyway, for the wrong reason: calling `.withResponse` on a plain Promise
+throws a TypeError that happens to look enough like a non-retryable error to still produce
+"escalated" outcomes, masking that the stubs weren't exercising the real code path at all. Only the
+progress test's assertion on exact turn/token counts was strict enough to actually fail and expose
+it. Fixed all three affected stub clients (retry.test.ts, progress.test.ts, escalation.test.ts) to
+implement the real `.withResponse()` chain, and added two new tests asserting rateLimitInfo is
+captured correctly from both a successful and a failed call. Lesson: a test "passing" isn't the same
+as a test exercising the path it claims to -- worth periodically checking that a mocked dependency's
+shape hasn't drifted from what production code actually calls.

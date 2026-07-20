@@ -11,16 +11,22 @@ function seedMinimalLead(db: ReturnType<typeof createTestDb>, id: number): void 
   ).run({ $id: id } as never);
 }
 
+// createCompletionWithRetry always calls .create(params).withResponse(), matching
+// the real SDK's APIPromise shape -- stubs must implement that chain, not just
+// a bare Promise, or a TypeError from the missing method masks whatever this
+// stub was actually meant to simulate.
 function makeThrowingClient(status: number, message: string, headers?: Record<string, string>): OpenAI {
   return {
     chat: {
       completions: {
-        create: async () => {
-          const err = new Error(message) as Error & { status: number; headers?: Record<string, string> };
-          err.status = status;
-          err.headers = headers;
-          throw err;
-        },
+        create: () => ({
+          withResponse: async () => {
+            const err = new Error(message) as Error & { status: number; headers?: Record<string, string> };
+            err.status = status;
+            err.headers = headers;
+            throw err;
+          },
+        }),
       },
     },
   } as unknown as OpenAI;
@@ -97,6 +103,83 @@ export const retryTests: Test[] = [
       assertTrue(
         Boolean(escalateRow) && escalateRow!.input_json.includes("LLM call failed after retries"),
         "expected it to still exhaust the (short) retry budget before escalating"
+      );
+    },
+  },
+  {
+    name: "runAgentForLead captures rate-limit headers from a successful response into RunResult.rateLimitInfo",
+    run: async () => {
+      const db = createTestDb();
+      seedMinimalLead(db, 5);
+      const headerValues: Record<string, string> = {
+        "x-ratelimit-limit-requests": "50",
+        "x-ratelimit-remaining-requests": "37",
+        "x-ratelimit-reset-requests": "6h12m0s",
+      };
+      const stubClient = {
+        chat: {
+          completions: {
+            create: () => ({
+              withResponse: async () => ({
+                data: {
+                  choices: [
+                    {
+                      message: {
+                        role: "assistant",
+                        content: null,
+                        tool_calls: [
+                          {
+                            id: "call_1",
+                            type: "function",
+                            function: { name: "escalate_to_agent", arguments: JSON.stringify({ lead_id: 5, reason: "test" }) },
+                          },
+                        ],
+                      },
+                    },
+                  ],
+                  usage: { total_tokens: 42 },
+                },
+                response: { headers: { get: (name: string) => headerValues[name] ?? null } },
+              }),
+            }),
+          },
+        },
+      } as unknown as OpenAI;
+
+      const result = await runAgentForLead(db, 5, stubClient);
+
+      assertTrue(result.outcome.kind === "escalated", `expected escalated outcome, got ${result.outcome.kind}`);
+      assertTrue(Boolean(result.rateLimitInfo), "expected rateLimitInfo to be captured");
+      assertTrue(result.rateLimitInfo!.limitRequests === 50, `expected limitRequests 50, got ${result.rateLimitInfo!.limitRequests}`);
+      assertTrue(
+        result.rateLimitInfo!.remainingRequests === 37,
+        `expected remainingRequests 37, got ${result.rateLimitInfo!.remainingRequests}`
+      );
+      assertTrue(
+        result.rateLimitInfo!.resetRequests === "6h12m0s",
+        `expected resetRequests '6h12m0s', got ${result.rateLimitInfo!.resetRequests}`
+      );
+    },
+  },
+  {
+    name: "runAgentForLead captures rate-limit headers from a failed (429) response too",
+    run: async () => {
+      const db = createTestDb();
+      seedMinimalLead(db, 6);
+      const stubClient = makeThrowingClient(429, "simulated daily quota exhausted", {
+        "retry-after": "1728",
+        "x-ratelimit-limit-requests": "50",
+        "x-ratelimit-remaining-requests": "0",
+        "x-ratelimit-reset-requests": "28m48s",
+      });
+
+      const result = await runAgentForLead(db, 6, stubClient, { maxRetries: 1, baseDelayMs: 1000 });
+
+      assertTrue(result.outcome.kind === "escalated", `expected escalated outcome, got ${result.outcome.kind}`);
+      assertTrue(Boolean(result.rateLimitInfo), "expected rateLimitInfo to be captured even from the failure path");
+      assertTrue(
+        result.rateLimitInfo!.remainingRequests === 0,
+        `expected remainingRequests 0, got ${result.rateLimitInfo!.remainingRequests}`
       );
     },
   },

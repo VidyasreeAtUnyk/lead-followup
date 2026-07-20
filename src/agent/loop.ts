@@ -44,6 +44,41 @@ function retryAfterSeconds(e: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/** Snapshot of the API's own rate-limit accounting, captured off response headers. */
+export interface RateLimitInfo {
+  limitRequests?: number;
+  remainingRequests?: number;
+  resetRequests?: string;
+  capturedAt: string;
+}
+
+function getHeaderValue(headers: unknown, name: string): string | null {
+  if (!headers) return null;
+  const maybeGetter = (headers as { get?: (n: string) => string | null }).get;
+  if (typeof maybeGetter === "function") return maybeGetter.call(headers, name);
+  return (headers as Record<string, string>)[name] ?? null;
+}
+
+/**
+ * Reads OpenAI's own x-ratelimit-* response headers -- present on both
+ * successful responses (via .withResponse()) and thrown errors (the SDK
+ * attaches .headers to those too). This is the actual source of truth for
+ * "how much quota is left," not an estimate: surfaced to the user after
+ * every run via RunResult.rateLimitInfo.
+ */
+function extractRateLimitInfo(headers: unknown): RateLimitInfo | undefined {
+  const limit = getHeaderValue(headers, "x-ratelimit-limit-requests");
+  const remaining = getHeaderValue(headers, "x-ratelimit-remaining-requests");
+  const reset = getHeaderValue(headers, "x-ratelimit-reset-requests");
+  if (limit === null && remaining === null && reset === null) return undefined;
+  return {
+    limitRequests: limit !== null ? Number(limit) : undefined,
+    remainingRequests: remaining !== null ? Number(remaining) : undefined,
+    resetRequests: reset ?? undefined,
+    capturedAt: nowIso(),
+  };
+}
+
 /**
  * Exponential backoff with jitter on 429/5xx only -- anything else (bad
  * request, auth failure, etc.) is not transient and is rethrown immediately
@@ -54,7 +89,8 @@ function retryAfterSeconds(e: unknown): number | null {
 async function createCompletionWithRetry(
   client: OpenAI,
   params: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming,
-  opts: RetryOptions = {}
+  opts: RetryOptions = {},
+  onRateLimitInfo?: (info: RateLimitInfo) => void
 ): Promise<OpenAI.Chat.Completions.ChatCompletion> {
   const maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
   const baseDelayMs = opts.baseDelayMs ?? DEFAULT_BASE_DELAY_MS;
@@ -62,9 +98,14 @@ async function createCompletionWithRetry(
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      return (await client.chat.completions.create(params)) as OpenAI.Chat.Completions.ChatCompletion;
+      const { data, response } = await client.chat.completions.create(params).withResponse();
+      const info = extractRateLimitInfo(response.headers);
+      if (info) onRateLimitInfo?.(info);
+      return data as OpenAI.Chat.Completions.ChatCompletion;
     } catch (e) {
       lastError = e;
+      const info = extractRateLimitInfo((e as { headers?: unknown })?.headers);
+      if (info) onRateLimitInfo?.(info);
       const status = (e as { status?: unknown })?.status;
       if (!isRetryableStatus(status)) throw e;
       const waitSeconds = retryAfterSeconds(e);
@@ -88,6 +129,7 @@ export interface RunResult {
   leadId: number;
   outcome: RunOutcome;
   assistantTurns: number;
+  rateLimitInfo?: RateLimitInfo;
 }
 
 export interface RunProgress {
@@ -131,6 +173,7 @@ export async function runAgentForLead(
   const startedAt = nowIso();
   let toolCallCount = 0;
   let totalTokens = 0;
+  let lastRateLimitInfo: RateLimitInfo | undefined;
 
   function finish(outcome: RunOutcome, turns: number): RunResult {
     const outcomeToMetric: Record<RunOutcome["kind"], RunOutcomeKind> = {
@@ -147,7 +190,7 @@ export async function runAgentForLead(
       tool_call_count: toolCallCount,
       estimated_token_cost: totalTokens * ESTIMATED_COST_PER_TOKEN,
     });
-    return { leadId, outcome, assistantTurns: turns };
+    return { leadId, outcome, assistantTurns: turns, rateLimitInfo: lastRateLimitInfo };
   }
 
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
@@ -167,7 +210,10 @@ export async function runAgentForLead(
       completion = await createCompletionWithRetry(
         client,
         { model: DEFAULT_MODEL, messages, tools: OPENAI_TOOLS, tool_choice: "auto" },
-        retryOpts
+        retryOpts,
+        (info) => {
+          lastRateLimitInfo = info;
+        }
       );
     } catch (e) {
       // The LLM call itself failed after retries were exhausted -- this must

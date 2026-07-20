@@ -19,7 +19,8 @@ npm run cli -- history 1    # full audit trail for lead 1
 
 `npm run cli -- process` (no id) drains the whole queue, one lead at a time, showing a live spinner
 (elapsed time, tokens so far) that's replaced by a permanent line each time a tool call resolves —
-see `src/cli/progress.ts`.
+see `src/cli/progress.ts` — followed by OpenAI's real remaining-requests count for that day, read
+straight off the API's own rate-limit response headers.
 `npm run cli -- close <leadId> <won|lost|canceled>` is the human action that records a
 closed deal (see "Why there's no `close_deal` tool" below).
 `npm run cli -- retry <leadId>` is the human action that un-parks a lead stuck on an escalation
@@ -285,20 +286,37 @@ lead this time. `docs/prompts.md` (Entry 13) has the full trail.
 - **Batched context fetches.** `get_lead_context` does one lead + one interaction-history query
   per call; at volume you'd prefetch/batch these (e.g., load a worker's whole shard of leads'
   contexts in one query) rather than a round trip per lead per tool call.
-- **Rate-limited, budgeted LLM calls.** `src/agent/loop.ts` now retries 429/5xx with exponential
+- **Rate-limited, budgeted LLM calls.** `src/agent/loop.ts` retries 429/5xx with exponential
   backoff and jitter (3 attempts), fails fast with zero retries when the response's `retry-after`
   is too long to be worth waiting for (a daily-quota-scale wait vs. a brief per-minute one -- no
   point burning more requests against a quota that's already exhausted for the day), and escalates
   gracefully instead of crashing once retries are exhausted -- the minimum bar, and something I hit
-  personally during development against a real 50-request/day account. The system prompt also
-  nudges the model to batch independent read-only tool calls (`get_lead_context`,
-  `check_contact_eligibility`, `find_matching_properties`, `get_property_market_data`) into a single
-  turn rather than one at a time, since each turn is a full request regardless of how many tool
-  calls it contains -- a real lever for requests-per-run, since a rate limit like this one caps
-  *requests*, not tokens. At real volume you'd still want a hard token/cost budget per run (the new
-  `run_metrics` table's `estimated_token_cost` is a first step toward even seeing this), a
-  request-rate limiter shared across workers instead of per-process retry, and probably a
-  cheaper/faster model for routine qualification-stage leads with escalation to a stronger model
+  personally during development against a real 50-request/day account.
+
+  Since that account's limit is on *requests* (turns), not tokens, the biggest lever turned out to
+  be turn count per run, not token usage. The system prompt (`src/agent/prompts.ts`) now explicitly
+  tells the model to batch `get_lead_context`, `check_contact_eligibility`, and
+  `find_matching_properties` together in its very first turn -- all three only need the `lead_id`
+  already known from the instruction, so there's no reason to wait for one before calling the
+  others, and it's the same one network request whether the model asks for one tool or three.
+  `get_property_market_data` still has to be its own later turn (it genuinely depends on
+  `find_matching_properties`'s result), but the prompt tells the model it can combine that call with
+  the terminal `propose_message`/`propose_viewing` in the same turn once it has a `property_id` --
+  as long as `get_property_market_data` is listed first, since tool calls within one turn execute in
+  order and the numeric-grounding check needs that data to already be committed. `log_note`, which
+  was previously encouraged "liberally," is now explicitly flagged as costing a full turn like any
+  other call and reserved for genuinely non-obvious reasoning, not a routine step. Together these cut
+  a typical happy-path run from ~5 turns to ~3.
+
+  `RunResult` also now carries `rateLimitInfo` -- OpenAI's own `x-ratelimit-*` response headers,
+  captured via the SDK's `.withResponse()` on both successful and failed calls, not an estimate.
+  `cli process` and the standalone `runQueue.ts` script print `X/Y requests remaining` after every
+  lead so it's visible in real time how much of the daily budget is left, without a separate command.
+
+  At real volume you'd still want a hard token/cost budget per run (the `run_metrics` table's
+  `estimated_token_cost` is a first step toward even seeing this), a request-rate limiter shared
+  across workers instead of per-process retry, and probably a cheaper/faster model for routine
+  qualification-stage leads with escalation to a stronger model
   only for ambiguous cases.
 - **SQLite itself.** `node:sqlite` is perfect for a single-process take-home; at 100× volume with
   multiple workers you'd move to Postgres for real concurrent writers (SQLite's single-writer

@@ -86,6 +86,11 @@ async function main() {
     },
     onLeadResult: (result) => {
       console.log(`Lead ${result.leadId}: ${result.outcome.kind} (${result.assistantTurns} turn(s))`);
+      const info = result.rateLimitInfo;
+      if (info && (info.remainingRequests !== undefined || info.limitRequests !== undefined)) {
+        const reset = info.resetRequests ? `, resets in ${info.resetRequests}` : "";
+        console.log(`  Quota: ${info.remainingRequests ?? "?"}/${info.limitRequests ?? "?"} requests remaining${reset}`);
+      }
     },
   });
   if (results.length === 0) {
