@@ -333,3 +333,32 @@ prohibition, state-machine transition, evidence-gated reactivation) -- 4 runs in
 scenario 3 (rejection/revise, which re-exercises the same propose path scenario 1 already covers,
 just twice more) and scenarios 4/7 (additional escalation/grounding variants of coverage scenario 2
 and 1 already provide, not new guardrail categories).
+
+## Entry 19 — Final live verification with a working key
+
+Getting a genuinely usable key took two dead ends first, both real and worth recording since they
+looked like code bugs before they weren't. First attempt hit `429` with "Rate limit reached... on
+tokens per min (TPM): Limit 100000, Used 100000" and an ~11-hour retry-after -- not the 50-req/day
+limit this session's optimization work targeted, but a separate token-based cap, tied to the
+*organization*, not the individual key. A second key generated under what was assumed to be a fresh
+account hit a different error immediately -- `429 You exceeded your current quota, please check your
+plan and billing details` (OpenAI's `insufficient_quota`) -- which turned out to mean the account
+itself had $0 balance and no payment method, since OpenAI no longer grants free trial credits to most
+new signups. Neither was a code problem: both times the system did exactly what it's supposed to --
+retried within budget, then escalated gracefully with the real provider error message intact
+(`system_triggered: true`, classified `transient` not `parked`, so no manual `retry` was needed once
+a working key was in place).
+
+Manual spot-checks against a properly billed key confirmed several things live rather than just in
+stubbed tests: the do-not-contact hard guardrail escalating correctly (Bob) while still batching its
+three context reads into turn 1 as designed (confirmed via `history`'s timestamps -- three calls in
+the same second, `escalate_to_agent` two seconds later); the numeric-grounding guardrail rejecting a
+real first draft that mentioned a shorthand price before market data had been fetched, then accepting
+the corrected second draft (Alice); and the rejection-feedback loop producing a materially different
+second proposal, not a cosmetic reword -- switched from `propose_viewing` to `propose_message`
+entirely, softer tone, real grounded figures (Grace).
+
+With that confidence, ran the actual graded suite: `npm run evals`, full 7 scenarios, no `--quick`.
+All 7 passed against the live model on the first clean attempt. This is the deliverable the eval
+requirement asks for -- scripted scenarios asserting real final DB state against a real LLM, not
+mocked responses -- and it passed end to end.
