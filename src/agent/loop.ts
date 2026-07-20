@@ -6,15 +6,18 @@ import { dispatchToolCall } from "../tools/index.js";
 import { getLead, insertRunMetric } from "../db/queries.js";
 import { nowIso } from "../db/client.js";
 import type { RunOutcomeKind } from "../domain/types.js";
+import {
+  DEFAULT_MODEL,
+  MAX_ASSISTANT_TURNS,
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_BASE_DELAY_MS,
+  MAX_WORTHWHILE_RETRY_AFTER_SECONDS,
+  ESTIMATED_COST_PER_TOKEN,
+} from "../config/limits.js";
+
+export { DEFAULT_MODEL };
 
 const TERMINAL_TOOLS = new Set(["propose_message", "propose_viewing", "send_message", "escalate_to_agent"]);
-const DEFAULT_MODEL = process.env.OPENAI_MODEL ?? "gpt-5.4-mini";
-const MAX_ASSISTANT_TURNS = 8;
-const DEFAULT_MAX_RETRIES = 3;
-const DEFAULT_BASE_DELAY_MS = 1000;
-// Rough blended estimate, not real pricing -- good enough to compare run cost
-// relatively (e.g. "this run cost 3x that one"), not to reconcile a bill.
-const ESTIMATED_COST_PER_TOKEN = 0.0000005;
 
 export interface RetryOptions {
   maxRetries?: number;
@@ -29,13 +32,6 @@ function isRetryableStatus(status: unknown): boolean {
   return status === 429 || (typeof status === "number" && status >= 500 && status < 600);
 }
 
-// If the API tells us how long to wait and it's longer than this, no amount
-// of in-process backoff will make the retry succeed before the caller gives
-// up anyway (e.g. a daily quota that resets in 20+ minutes, not 10 seconds).
-// Retrying anyway just burns more requests against the same exhausted quota
-// for zero chance of success -- fail fast instead.
-const MAX_WORTHWHILE_RETRY_AFTER_SECONDS = 30;
-
 function retryAfterSeconds(e: unknown): number | null {
   const headers = (e as { headers?: Record<string, string> })?.headers;
   const raw = headers?.["retry-after"];
@@ -46,17 +42,25 @@ function retryAfterSeconds(e: unknown): number | null {
 
 /**
  * Snapshot of the API's own rate-limit accounting, captured off response
- * headers. OpenAI populates this reliably on both success and error
- * responses. Gemini (loopGemini.ts) has no equivalent structured header on
- * success -- it only surfaces quota numbers inside a 429 error's message
- * text -- so its rateLimitInfo is best-effort and often absent; that
- * asymmetry is real, not a bug, and callers should treat a missing value as
- * "unknown," not "unlimited."
+ * headers. OpenAI enforces *both* of these independently and simultaneously
+ * -- a request only succeeds if it satisfies every dimension, so having
+ * plenty of requests left says nothing about whether the token bucket for
+ * the current minute is also clear. Reporting only one gives a falsely
+ * reassuring picture; both are captured and shown together.
+ *
+ * Gemini (loopGemini.ts) has no equivalent structured header on success --
+ * it only surfaces quota numbers inside a 429 error's message text -- so its
+ * rateLimitInfo is best-effort and often absent; that asymmetry is real, not
+ * a bug, and callers should treat a missing value as "unknown," not
+ * "unlimited."
  */
 export interface RateLimitInfo {
   limitRequests?: number;
   remainingRequests?: number;
   resetRequests?: string;
+  limitTokens?: number;
+  remainingTokens?: number;
+  resetTokens?: string;
   capturedAt: string;
 }
 
@@ -72,17 +76,26 @@ function getHeaderValue(headers: unknown, name: string): string | null {
  * successful responses (via .withResponse()) and thrown errors (the SDK
  * attaches .headers to those too). This is the actual source of truth for
  * "how much quota is left," not an estimate: surfaced to the user after
- * every run via RunResult.rateLimitInfo.
+ * every run via RunResult.rateLimitInfo, and standalone via `cli quota`.
  */
-function extractRateLimitInfo(headers: unknown): RateLimitInfo | undefined {
+export function extractRateLimitInfo(headers: unknown): RateLimitInfo | undefined {
   const limit = getHeaderValue(headers, "x-ratelimit-limit-requests");
   const remaining = getHeaderValue(headers, "x-ratelimit-remaining-requests");
   const reset = getHeaderValue(headers, "x-ratelimit-reset-requests");
-  if (limit === null && remaining === null && reset === null) return undefined;
+  const limitTok = getHeaderValue(headers, "x-ratelimit-limit-tokens");
+  const remainingTok = getHeaderValue(headers, "x-ratelimit-remaining-tokens");
+  const resetTok = getHeaderValue(headers, "x-ratelimit-reset-tokens");
+  if (
+    limit === null && remaining === null && reset === null &&
+    limitTok === null && remainingTok === null && resetTok === null
+  ) return undefined;
   return {
     limitRequests: limit !== null ? Number(limit) : undefined,
     remainingRequests: remaining !== null ? Number(remaining) : undefined,
     resetRequests: reset ?? undefined,
+    limitTokens: limitTok !== null ? Number(limitTok) : undefined,
+    remainingTokens: remainingTok !== null ? Number(remainingTok) : undefined,
+    resetTokens: resetTok ?? undefined,
     capturedAt: nowIso(),
   };
 }
@@ -149,7 +162,7 @@ export interface RunProgress {
 
 export type ProgressCallback = (progress: RunProgress) => void;
 
-function getClient(): OpenAI {
+export function getClient(): OpenAI {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error(

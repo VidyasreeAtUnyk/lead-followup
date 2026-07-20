@@ -37,7 +37,8 @@ export async function processQueue(
   client?: OpenAI,
   only?: number,
   workerId: string = defaultWorkerId(),
-  hooks: ProcessQueueHooks = {}
+  hooks: ProcessQueueHooks = {},
+  limit?: number
 ): Promise<RunResult[]> {
   const results: RunResult[] = [];
 
@@ -56,7 +57,11 @@ export async function processQueue(
     }
   }
 
-  const queue = only !== undefined ? getQueue(db).filter((l) => l.id === only) : getQueue(db);
+  const fullQueue = only !== undefined ? getQueue(db).filter((l) => l.id === only) : getQueue(db);
+  // limit caps how many *new* leads this pass starts -- it doesn't count a
+  // resumed in-progress lead above, since that one was already committed to
+  // before this call and isn't a fresh request-budget decision.
+  const queue = limit !== undefined ? fullQueue.slice(0, limit) : fullQueue;
 
   for (const lead of queue) {
     if (results.some((r) => r.leadId === lead.id)) continue;
@@ -87,11 +92,17 @@ async function main() {
     onLeadResult: (result) => {
       console.log(`Lead ${result.leadId}: ${result.outcome.kind} (${result.assistantTurns} turn(s))`);
       const info = result.rateLimitInfo;
-      if (info && (info.remainingRequests !== undefined || info.limitRequests !== undefined)) {
-        const remaining = info.remainingRequests ?? "?";
-        const limit = info.limitRequests ?? "?";
-        const reset = info.resetRequests ? `, resets in ${info.resetRequests}` : "";
-        console.log(`  Quota: ${remaining}/${limit} requests remaining${reset}`);
+      // Requests/day and tokens/min are independent limits -- a run can be
+      // blocked by one while the other looks fine, so both are reported
+      // rather than just requests (see printRateLimitInfo in cli/index.ts
+      // for the fuller version of this reasoning).
+      if (info?.remainingRequests !== undefined || info?.limitRequests !== undefined) {
+        const reset = info?.resetRequests ? `, resets in ${info.resetRequests}` : "";
+        console.log(`  Quota (requests/day): ${info?.remainingRequests ?? "?"}/${info?.limitRequests ?? "?"} remaining${reset}`);
+      }
+      if (info?.remainingTokens !== undefined || info?.limitTokens !== undefined) {
+        const reset = info?.resetTokens ? `, resets in ${info.resetTokens}` : "";
+        console.log(`  Quota (tokens/min): ${info?.remainingTokens ?? "?"}/${info?.limitTokens ?? "?"} remaining${reset}`);
       }
     },
   });

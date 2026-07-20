@@ -1,5 +1,6 @@
 import type { Lead, Stage } from "./types.js";
 import { ToolError } from "./errors.js";
+import { MAX_UNANSWERED_ATTEMPTS } from "../config/limits.js";
 
 /**
  * The funnel graph from the brief. This is the single source of truth for
@@ -26,11 +27,9 @@ export const STAGE_EDGES: Record<Stage, Stage[]> = {
 
 export const REACTIVATABLE_STAGES: Stage[] = ["dormant", "canceled"];
 
-export const CONTACT_WINDOW_DAYS = 14;
-export const MAX_SENDS_IN_WINDOW = 3;
-export const MAX_UNANSWERED_ATTEMPTS = 3;
-export const REACTIVATION_EVIDENCE_MAX_AGE_DAYS = 30;
-export const REACTIVATION_EVIDENCE_TYPES = ["inquiry", "reply"] as const;
+// Contact-frequency, reactivation-evidence, and agent-loop limits all live in
+// src/config/limits.ts now -- see that file for the single list of every
+// tunable threshold in the system.
 
 export function assertStageTransition(from: Stage, to: Stage): void {
   const allowed = STAGE_EDGES[from] ?? [];

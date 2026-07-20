@@ -334,3 +334,37 @@ files (`retry.test.ts`, `progress.test.ts`, `escalation.test.ts`), which still h
 bare-Promise `create()` shape -- same latent bug, not yet triggered here because this branch didn't
 have any code calling `.withResponse()` before this change. Ported the two new rate-limit-capture
 regression tests too. All 25/25 unit tests pass (23 prior + 2 new), `tsc --noEmit` clean.
+
+## Entry 19 — Catching this branch back up to main (--limit, quota, tokens/min, config consolidation)
+
+Main picked up four more rounds of work after the last port (Entry 18): request-per-invocation caps
+(`--limit` on `process`, `--quick` on `evals`), a standalone `cli quota` command, tokens/minute quota
+reporting alongside requests/day (after live testing found these are independent OpenAI limits -- a
+run can 429 on an exhausted token bucket while the request count looks perfectly healthy), and
+consolidating every tunable limit into `src/config/limits.ts`. Ported all four.
+
+Three files (`stateMachine.ts`, the three tool files enforcing contact/reactivation limits,
+`queries.ts`, `evals/run.ts`, `locking.test.ts`) were verified byte-identical to this branch's
+pre-port baseline first (diffed directly, not assumed), so those copied straight from main with no
+manual reconciliation needed. The files that had genuinely diverged (`loop.ts`'s dispatcher split,
+`cli/index.ts`'s `watch` command, `retry.test.ts`'s Gemini-override regression test) needed real
+merging: `loop.ts` now imports its five operational constants from `config/limits.ts` the same way
+main does, with the dispatcher structure and Gemini-specific `RateLimitInfo` doc comment preserved;
+`cli/index.ts` got `--limit` added to *both* `process` and `watch` (main only has `process`, since it
+has no `watch` command -- added it here anyway for consistency, since `watch`'s whole job is an
+unattended long-running loop, which is exactly the scenario `--limit` protects against per-pass); the
+Gemini-override test in `retry.test.ts` was spliced back into main's current file rather than
+hand-patching the old version, since main's file had itself changed shape (two new tests, token
+fields added to an existing one).
+
+`config/limits.ts` needed one genuine deviation from a straight copy: `loopGemini.ts` has its own
+`ESTIMATED_COST_PER_TOKEN` (Gemini Flash-tier pricing, 0.0000002) and `DEFAULT_GEMINI_MODEL`, both
+legitimately different values from OpenAI's, not just duplicated numbers -- consolidating those into
+main's shared constants would have silently priced Gemini runs at OpenAI's rate. Kept them as
+separate, clearly-named constants in the same file, while sharing the turn-cap/retry/backoff
+constants that genuinely are identical provider-agnostic loop control. `cli quota` stayed
+OpenAI-only, matching main -- Gemini has no reliable quota-on-success mechanism worth building a
+parallel check for.
+
+`tsc --noEmit` clean, 27/27 unit tests pass (26 shared with main + this branch's own
+MODEL_PROVIDER-override regression test).

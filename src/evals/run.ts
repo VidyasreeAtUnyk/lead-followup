@@ -225,9 +225,27 @@ const scenarios: Scenario[] = [
   },
 ];
 
+// A minimal subset for fast local iteration: one full propose->approve->send
+// cycle (1), one guardrail from each distinct category -- hard prohibition
+// (2, do_not_contact), state machine (5, won -> segment flip, no LLM call at
+// all), and evidence-gated reactivation (6) -- covering everything the brief
+// requires in 4 LLM runs instead of the full suite's 9. Scenarios 3, 4, and 7
+// are skipped (rejection/revise adds 2 more runs re-testing the same propose
+// path; 4 and 7 are additional escalation/grounding variants, not new
+// guardrail categories) -- run without --quick before submitting/grading.
+const QUICK_SCENARIO_NUMBERS = new Set(["1", "2", "5", "6"]);
+
 async function main() {
+  const quick = process.argv.includes("--quick");
+  const selected = quick ? scenarios.filter((s) => QUICK_SCENARIO_NUMBERS.has(s.name.split(".")[0])) : scenarios;
+  if (quick) {
+    console.log(
+      `Quick mode: running ${selected.length}/${scenarios.length} scenarios (skips 3, 4, 7) to conserve API quota.\n`
+    );
+  }
+
   const results: { name: string; passed: boolean; error?: string }[] = [];
-  for (const [i, scenario] of scenarios.entries()) {
+  for (const [i, scenario] of selected.entries()) {
     if (i > 0) await sleep(8000); // pace scenarios to stay under this account's 10-req/min cap
     process.stdout.write(`Running: ${scenario.name} ... `);
     try {

@@ -7,6 +7,13 @@ import { getLead, insertRunMetric } from "../db/queries.js";
 import { nowIso } from "../db/client.js";
 import type { RunOutcomeKind } from "../domain/types.js";
 import type { RunResult, RunOutcome, ProgressCallback, RetryOptions, RateLimitInfo } from "./loop.js";
+import {
+  DEFAULT_GEMINI_MODEL,
+  MAX_ASSISTANT_TURNS,
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_BASE_DELAY_MS,
+  ESTIMATED_COST_PER_TOKEN_GEMINI,
+} from "../config/limits.js";
 
 /**
  * Gemini equivalent of runAgentForLead (src/agent/loop.ts). Experiment-branch
@@ -18,13 +25,6 @@ import type { RunResult, RunOutcome, ProgressCallback, RetryOptions, RateLimitIn
  */
 
 const TERMINAL_TOOLS = new Set(["propose_message", "propose_viewing", "send_message", "escalate_to_agent"]);
-const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-flash-latest";
-const MAX_ASSISTANT_TURNS = 8;
-const DEFAULT_MAX_RETRIES = 3;
-const DEFAULT_BASE_DELAY_MS = 1000;
-// Rough blended estimate for Gemini Flash-tier pricing, not exact -- same
-// "compare runs relatively" caveat as loop.ts's OpenAI estimate.
-const ESTIMATED_COST_PER_TOKEN = 0.0000002;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -126,7 +126,7 @@ export async function runAgentForLeadGemini(
       ended_at: nowIso(),
       outcome: outcomeToMetric[outcome.kind],
       tool_call_count: toolCallCount,
-      estimated_token_cost: totalTokens * ESTIMATED_COST_PER_TOKEN,
+      estimated_token_cost: totalTokens * ESTIMATED_COST_PER_TOKEN_GEMINI,
     });
     return { leadId, outcome, assistantTurns: turns, rateLimitInfo: lastRateLimitInfo };
   }

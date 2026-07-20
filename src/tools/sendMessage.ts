@@ -3,12 +3,8 @@ import type { ToolDefinition } from "./types.js";
 import { getLead, getProposal, listInteractions, updateLead, countSendsInWindow } from "../db/queries.js";
 import { nowIso } from "../db/client.js";
 import { ToolError } from "../domain/errors.js";
-import {
-  nextStageAfterMessageSend,
-  nextStageAfterViewingSend,
-  CONTACT_WINDOW_DAYS,
-  MAX_SENDS_IN_WINDOW,
-} from "../domain/stateMachine.js";
+import { nextStageAfterMessageSend, nextStageAfterViewingSend } from "../domain/stateMachine.js";
+import { CONTACT_WINDOW_DAYS, MAX_SENDS_IN_WINDOW } from "../config/limits.js";
 
 const schema = z.object({
   proposal_id: z.number().int().positive(),

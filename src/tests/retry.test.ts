@@ -146,6 +146,9 @@ export const retryTests: Test[] = [
         "x-ratelimit-limit-requests": "50",
         "x-ratelimit-remaining-requests": "37",
         "x-ratelimit-reset-requests": "6h12m0s",
+        "x-ratelimit-limit-tokens": "100000",
+        "x-ratelimit-remaining-tokens": "82000",
+        "x-ratelimit-reset-tokens": "12s",
       };
       const stubClient = {
         chat: {
@@ -189,6 +192,45 @@ export const retryTests: Test[] = [
       assertTrue(
         result.rateLimitInfo!.resetRequests === "6h12m0s",
         `expected resetRequests '6h12m0s', got ${result.rateLimitInfo!.resetRequests}`
+      );
+      assertTrue(
+        result.rateLimitInfo!.limitTokens === 100000,
+        `expected limitTokens 100000, got ${result.rateLimitInfo!.limitTokens}`
+      );
+      assertTrue(
+        result.rateLimitInfo!.remainingTokens === 82000,
+        `expected remainingTokens 82000, got ${result.rateLimitInfo!.remainingTokens}`
+      );
+    },
+  },
+  {
+    name: "runAgentForLead captures a near-exhausted TPM header even when the RPD bucket looks healthy",
+    run: async () => {
+      // Regression for a real live scenario: 429 with plenty of requests/day
+      // remaining but tokens/min essentially exhausted. Reporting only the
+      // requests dimension (as this system used to) would have looked
+      // reassuring while the actual blocker -- TPM -- stayed invisible.
+      const db = createTestDb();
+      seedMinimalLead(db, 8);
+      const stubClient = makeThrowingClient(429, "simulated TPM exhaustion with healthy RPD", {
+        "retry-after": "1728",
+        "x-ratelimit-limit-requests": "50",
+        "x-ratelimit-remaining-requests": "22",
+        "x-ratelimit-limit-tokens": "100000",
+        "x-ratelimit-remaining-tokens": "444",
+      });
+
+      const result = await runAgentForLead(db, 8, stubClient, { maxRetries: 1, baseDelayMs: 1000 });
+
+      assertTrue(result.outcome.kind === "escalated", `expected escalated outcome, got ${result.outcome.kind}`);
+      assertTrue(Boolean(result.rateLimitInfo), "expected rateLimitInfo to be captured");
+      assertTrue(
+        result.rateLimitInfo!.remainingRequests === 22,
+        `expected remainingRequests 22 (healthy), got ${result.rateLimitInfo!.remainingRequests}`
+      );
+      assertTrue(
+        result.rateLimitInfo!.remainingTokens === 444,
+        `expected remainingTokens 444 (nearly exhausted), got ${result.rateLimitInfo!.remainingTokens}`
       );
     },
   },

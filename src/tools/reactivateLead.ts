@@ -2,11 +2,8 @@ import { z } from "zod";
 import type { ToolDefinition } from "./types.js";
 import { getLead, getInteraction, updateLead } from "../db/queries.js";
 import { ToolError } from "../domain/errors.js";
-import {
-  canReactivateFrom,
-  REACTIVATION_EVIDENCE_MAX_AGE_DAYS,
-  REACTIVATION_EVIDENCE_TYPES,
-} from "../domain/stateMachine.js";
+import { canReactivateFrom } from "../domain/stateMachine.js";
+import { REACTIVATION_EVIDENCE_MAX_AGE_DAYS, REACTIVATION_EVIDENCE_TYPES } from "../config/limits.js";
 
 const schema = z.object({
   lead_id: z.number().int().positive(),

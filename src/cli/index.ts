@@ -20,7 +20,7 @@ import {
 import { colorStage, truncate, formatTimestamp } from "./format.js";
 import { RunProgressRenderer } from "./progress.js";
 import { processQueue } from "../agent/runQueue.js";
-import type { RunResult } from "../agent/loop.js";
+import { getClient, extractRateLimitInfo, DEFAULT_MODEL, type RunResult } from "../agent/loop.js";
 import { closeDeal, type DealOutcome } from "../domain/dealClose.js";
 import { isToolError } from "../domain/errors.js";
 import { computeAggregateMetrics } from "../domain/metrics.js";
@@ -196,9 +196,11 @@ program
 
 program
   .command("process [leadId]")
-  .description("Run the agent loop over the queue (or a single lead id) -- requires OPENAI_API_KEY")
-  .action(async (leadIdArg?: string) => {
+  .description("Run the agent loop over the queue (or a single lead id) -- requires OPENAI_API_KEY (or GEMINI_API_KEY with MODEL_PROVIDER=gemini)")
+  .option("-n, --limit <count>", "process at most this many leads this pass (guards against draining a whole day's quota in one run)")
+  .action(async (leadIdArg: string | undefined, opts: { limit?: string }) => {
     const only = leadIdArg ? Number(leadIdArg) : undefined;
+    const limit = opts.limit ? Number(opts.limit) : undefined;
     const database = db();
 
     let renderer: RunProgressRenderer | null = null;
@@ -222,7 +224,7 @@ program
         activeLeadId = null;
         printRateLimitInfo(result.rateLimitInfo);
       },
-    });
+    }, limit);
 
     if (results.length === 0) {
       console.log(chalk.dim("Queue is empty -- nothing to process."));
@@ -232,21 +234,69 @@ program
 /**
  * Real quota numbers off the provider's own response, captured after every
  * model call (see RateLimitInfo in src/agent/loop.ts) -- not an estimate.
- * OpenAI reports this on every call (success or failure). Gemini only
- * surfaces it inside a 429 error's message, and only best-effort, so on
- * Gemini this often prints nothing at all -- that's an honest "unknown," not
- * a bug. Printed after each lead so it's obvious how much of the daily
- * budget is left without needing a separate command.
+ * OpenAI reports both dimensions it enforces independently (requests/day and
+ * tokens/minute -- a run can be blocked by one while the other looks fine,
+ * so both print separately). Gemini only surfaces quota inside a 429 error's
+ * message, best-effort, so on Gemini this often prints nothing at all --
+ * that's an honest "unknown," not a bug.
  */
 function printRateLimitInfo(info: RunResult["rateLimitInfo"]): void {
-  if (!info || (info.remainingRequests === undefined && info.limitRequests === undefined)) return;
-  const remaining = info.remainingRequests ?? "?";
-  const limit = info.limitRequests ?? "?";
-  const reset = info.resetRequests ? `, resets in ${info.resetRequests}` : "";
-  const low = typeof info.remainingRequests === "number" && info.remainingRequests <= 5;
-  const line = `  Quota: ${remaining}/${limit} requests remaining${reset}`;
-  console.log(low ? chalk.red(line) : chalk.dim(line));
+  if (!info) return;
+
+  if (info.remainingRequests !== undefined || info.limitRequests !== undefined) {
+    const remaining = info.remainingRequests ?? "?";
+    const limit = info.limitRequests ?? "?";
+    const reset = info.resetRequests ? `, resets in ${info.resetRequests}` : "";
+    const low = typeof info.remainingRequests === "number" && info.remainingRequests <= 5;
+    const line = `  Quota (requests/day): ${remaining}/${limit} remaining${reset}`;
+    console.log(low ? chalk.red(line) : chalk.dim(line));
+  }
+
+  if (info.remainingTokens !== undefined || info.limitTokens !== undefined) {
+    const remaining = info.remainingTokens ?? "?";
+    const limit = info.limitTokens ?? "?";
+    const reset = info.resetTokens ? `, resets in ${info.resetTokens}` : "";
+    const low =
+      typeof info.remainingTokens === "number" &&
+      typeof info.limitTokens === "number" &&
+      info.limitTokens > 0 &&
+      info.remainingTokens / info.limitTokens <= 0.05;
+    const line = `  Quota (tokens/min): ${remaining}/${limit} remaining${reset}`;
+    console.log(low ? chalk.red(line) : chalk.dim(line));
+  }
 }
+
+program
+  .command("quota")
+  .description("Check remaining OpenAI API quota with one minimal request -- no lead is touched, no tool calls, no DB writes")
+  .action(async () => {
+    let client: ReturnType<typeof getClient>;
+    try {
+      client = getClient();
+    } catch (e) {
+      console.log(chalk.red((e as Error).message));
+      return;
+    }
+
+    try {
+      const { response } = await client.chat.completions.create({
+        model: DEFAULT_MODEL,
+        messages: [{ role: "user", content: "Reply with the single word: pong" }],
+        max_completion_tokens: 64,
+      }).withResponse();
+      const info = extractRateLimitInfo(response.headers);
+      if (!info) {
+        console.log(chalk.dim("Call succeeded, but the API didn't return x-ratelimit-* headers this time."));
+        return;
+      }
+      printRateLimitInfo(info);
+    } catch (e) {
+      const info = extractRateLimitInfo((e as { headers?: unknown })?.headers);
+      if (info) printRateLimitInfo(info);
+      const message = e instanceof Error ? e.message : String(e);
+      console.log(chalk.red(`Quota check call itself failed: ${message}`));
+    }
+  });
 
 function sleepInterruptible(ms: number, stopSignal: { stopped: boolean }): Promise<void> {
   return new Promise((resolve) => {
@@ -265,8 +315,10 @@ program
   .command("watch")
   .description("Continuously process the queue on an interval until stopped (Ctrl+C) -- an unattended demo loop")
   .option("-i, --interval <seconds>", "seconds between passes", "30")
-  .action(async (opts: { interval: string }) => {
+  .option("-n, --limit <count>", "process at most this many leads per pass (guards against draining quota over a long unattended run)")
+  .action(async (opts: { interval: string; limit?: string }) => {
     const intervalMs = Math.max(5, Number(opts.interval)) * 1000;
+    const limit = opts.limit ? Number(opts.limit) : undefined;
     const database = db();
     console.log(chalk.bold(`Watching the queue every ${intervalMs / 1000}s -- press Ctrl+C to stop.\n`));
 
@@ -302,7 +354,7 @@ program
           activeLeadId = null;
           printRateLimitInfo(result.rateLimitInfo);
         },
-      });
+      }, limit);
 
       if (results.length === 0) {
         console.log(chalk.dim("Nothing to process this pass."));

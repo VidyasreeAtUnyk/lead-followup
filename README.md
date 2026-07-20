@@ -51,8 +51,13 @@ npm run cli -- history 1    # full audit trail for lead 1
 
 `npm run cli -- process` (no id) drains the whole queue, one lead at a time, showing a live spinner
 (elapsed time, tokens so far) that's replaced by a permanent line each time a tool call resolves —
-see `src/cli/progress.ts` — followed by the provider's real remaining-requests count for that day
-where available (always on OpenAI; best-effort on Gemini, see the note below).
+see `src/cli/progress.ts` — followed by the provider's real remaining-requests/tokens count for that
+day where available (always on OpenAI, both requests/day and tokens/minute; best-effort on Gemini,
+see the note below). Add `--limit <n>` (e.g. `npm run cli -- process --limit 2`, also on `watch`) to
+cap how many *new* leads a pass starts, so a casual invocation against a small daily quota can't
+drain the whole queue in one shot. `npm run cli -- quota` checks the same real OpenAI quota numbers
+standalone, without processing any lead — one minimal completion call (no tools, no DB writes); it
+has no Gemini equivalent, since Gemini exposes no quota data on a successful call to check.
 `npm run cli -- close <leadId> <won|lost|canceled>` is the human action that records a
 closed deal (see "Why there's no `close_deal` tool" below).
 `npm run cli -- retry <leadId>` is the human action that un-parks a lead stuck on an escalation
@@ -66,6 +71,8 @@ Other scripts:
 ```bash
 npm run reset-db      # wipes data/leads.sqlite
 npm run evals         # runs the 7 scripted scenarios in src/evals/run.ts against a throwaway db
+npm run evals -- --quick  # runs only 4/7 (1, 2, 5, 6) for cheaper local iteration -- run the full
+                          # suite before treating the eval requirement as done
 npm run test          # deterministic unit tests (grounding parsing, retry/backoff, locking) -- no API key needed
 npm run demo:resume   # kills the agent process mid-run and shows it resumes correctly (see below)
 npm run cli -- metrics  # aggregate run stats: escalation rate, tool calls/run, estimated cost, approval turnaround
@@ -157,6 +164,16 @@ triggers it.
 The brief requires guardrails to live in code beneath the model, not in prompt text the model
 could ignore. Concretely:
 
+Every tunable number behind these rules — the contact-frequency window and cap, the reactivation
+evidence freshness window, plus the agent loop's own operational knobs (turn cap, retry count,
+backoff, lock timeout) — lives in one file, `src/config/limits.ts`, each with a comment on *why*
+that value. The guardrail logic itself stays where it's enforced (`src/domain/stateMachine.ts`,
+`src/tools/*.ts`); only the actual numbers were pulled out. Provider-specific values (cost-per-token
+estimate, default model name) are kept as separate constants per provider in the same file, since
+those genuinely differ — Gemini Flash-tier pricing isn't OpenAI's, and they use different model
+names — while the shared operational knobs (turn cap, retries, backoff) are one definition used by
+both `loop.ts` and `loopGemini.ts`.
+
 1. **Hard prohibition — never contact without an approved proposal, never contact `do_not_contact`.**
    - `send_message` (`src/tools/sendMessage.ts`) checks `proposal.status === 'approved'` and
      `lead.do_not_contact` *independently*, before doing anything else, regardless of how it was
@@ -190,7 +207,7 @@ could ignore. Concretely:
 
 3. **Contact-frequency cap.** `send_message` independently queries `countSendsInWindow` (a rolling
    14-day window, cap of 3 successful sends, `src/db/queries.ts` + constants in
-   `src/domain/stateMachine.ts`) before allowing another send, no matter what the model's plan was.
+   `src/config/limits.ts`) before allowing another send, no matter what the model's plan was.
 
 4. **(Stretch) Numeric grounding**, described above — implemented because it directly targets a
    realistic failure mode (a model narrating a plausible-sounding but fabricated price) and was
@@ -336,11 +353,14 @@ lead this time. `docs/prompts.md` (Entry 13) has the full trail.
   a routine step, since it costs a full turn like any other call. Together these cut a typical
   happy-path run from ~5 turns to ~3, for both providers.
 
-  `RunResult` also carries `rateLimitInfo`. On OpenAI this is real: the SDK's `.withResponse()`
-  exposes `x-ratelimit-*` response headers on both successful and failed calls, so `cli process`
-  (and `watch`, and the standalone `runQueue.ts` script) print `X/Y requests remaining` after every
-  lead, straight off the API. Gemini has no equivalent on success -- there is no header to read --
-  so its `rateLimitInfo` only ever gets populated from parsing a 429 error's message text
+  `RunResult` also carries `rateLimitInfo`. On OpenAI this is real, and covers *both* dimensions
+  OpenAI enforces independently -- requests/day and tokens/minute -- since a run can be blocked by a
+  nearly-exhausted token bucket while the request count still looks perfectly healthy (this happened
+  live during testing: healthy requests remaining, but a 429 anyway from a near-zero token bucket).
+  The SDK's `.withResponse()` exposes both header pairs on successful and failed calls, so `cli
+  process` (and `watch`, and `cli quota`, and the standalone `runQueue.ts` script) print both lines
+  after every lead, straight off the API. Gemini has no equivalent on success -- there is no header
+  to read -- so its `rateLimitInfo` only ever gets populated from parsing a 429 error's message text
   (`loopGemini.ts`'s `extractGeminiQuotaInfo`), and even then only the fields actually present in
   that message. In practice: on Gemini you'll usually see no quota line after a successful run and a
   partial one after a real 429. That's an honest gap, not a bug to paper over with a fabricated
