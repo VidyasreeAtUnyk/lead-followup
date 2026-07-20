@@ -227,6 +227,74 @@ program
     }
   });
 
+function sleepInterruptible(ms: number, stopSignal: { stopped: boolean }): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    const poll = setInterval(() => {
+      if (stopSignal.stopped) {
+        clearTimeout(timer);
+        clearInterval(poll);
+        resolve();
+      }
+    }, 200);
+  });
+}
+
+program
+  .command("watch")
+  .description("Continuously process the queue on an interval until stopped (Ctrl+C) -- an unattended demo loop")
+  .option("-i, --interval <seconds>", "seconds between passes", "30")
+  .action(async (opts: { interval: string }) => {
+    const intervalMs = Math.max(5, Number(opts.interval)) * 1000;
+    const database = db();
+    console.log(chalk.bold(`Watching the queue every ${intervalMs / 1000}s -- press Ctrl+C to stop.\n`));
+
+    const stopSignal = { stopped: false };
+    process.on("SIGINT", () => {
+      stopSignal.stopped = true;
+      console.log(chalk.dim("\nStopping after this pass..."));
+    });
+
+    let passNumber = 0;
+    while (!stopSignal.stopped) {
+      passNumber += 1;
+      console.log(chalk.cyan(`--- Pass ${passNumber} at ${new Date().toLocaleTimeString()} ---`));
+
+      let renderer: RunProgressRenderer | null = null;
+      let activeLeadId: number | null = null;
+
+      const results = await processQueue(database, undefined, undefined, undefined, {
+        onProgress: (leadId, progress) => {
+          if (activeLeadId !== leadId) {
+            activeLeadId = leadId;
+            const lead = getLead(database, leadId);
+            renderer = new RunProgressRenderer();
+            renderer.startLead(`Lead ${leadId}${lead ? ` (${lead.name})` : ""}`);
+          }
+          renderer?.onProgress(progress);
+        },
+        onLeadResult: (result) => {
+          renderer?.finishLead(
+            `${chalk.bold(result.outcome.kind)} -- Lead ${result.leadId} (${result.assistantTurns} turn(s))`
+          );
+          renderer = null;
+          activeLeadId = null;
+        },
+      });
+
+      if (results.length === 0) {
+        console.log(chalk.dim("Nothing to process this pass."));
+      }
+      console.log();
+
+      if (stopSignal.stopped) break;
+      await sleepInterruptible(intervalMs, stopSignal);
+    }
+
+    console.log(chalk.bold(`Stopped after ${passNumber} pass(es).`));
+    process.exit(0);
+  });
+
 program
   .command("close <leadId> <outcome>")
   .description("Human action: record a deal outcome (won|lost|canceled) for a lead in decision_pending")
