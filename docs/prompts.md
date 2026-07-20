@@ -405,3 +405,23 @@ flagged red on its own threshold (absolute <=5 for requests, since limits vary l
 reproducing the exact live scenario (22/50 requests, 444/100000 tokens) to make sure a healthy request
 count can never again quietly stand in for the whole picture. Verified against the live key
 afterward: `cli quota` now prints both lines, and the token one was the one actually near zero.
+
+## Entry 22 — Per-turn token overhead: measured, considered, deliberately not pursued
+
+Once tokens/minute (not requests/day) turned out to be the real live blocker, the natural next
+question was whether the per-turn overhead itself could shrink. Measured it directly rather than
+guessing: `buildSystemPrompt()` is ~1507 tokens, the 10 tool JSON schemas (`OPENAI_TOOLS`) are
+~1090 tokens, ~2597 combined -- and that full payload gets resent on *every* turn, since chat
+completions calls are stateless, so a 2-3 turn run needs 5000-7800+ tokens of overhead alone before
+counting the growing conversation history.
+
+Decided not to trim it, for two reasons. First, it wouldn't have fixed the actual problem in front of
+us: even an aggressive cut couldn't plausibly get a turn's requirement under the ~445 tokens actually
+remaining -- only the real TPM reset (or a different billing tier) unblocks that. Second, and more
+generally, the prompt and tool descriptions aren't padding -- they're carrying the stage-graph
+explanation, the guardrail priority ordering, and the turn-batching instructions that got the
+*request* count down in Entry 17. Shrinking that text to save tokens risks the model needing *more*
+turns to reach the same correct decision, which could quietly undo that earlier win in the metric
+that actually matters (requests/day, the harder daily cap) while chasing a softer one (tokens/min,
+which regenerates continuously). Recorded here as a reasoned pass, not an oversight: this is a real
+lever for a production system at real volume, and out of scope for what this submission needs.
