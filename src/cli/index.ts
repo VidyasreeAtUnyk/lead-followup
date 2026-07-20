@@ -20,7 +20,7 @@ import {
 import { colorStage, truncate, formatTimestamp } from "./format.js";
 import { RunProgressRenderer } from "./progress.js";
 import { processQueue } from "../agent/runQueue.js";
-import type { RunResult } from "../agent/loop.js";
+import { getClient, extractRateLimitInfo, DEFAULT_MODEL, type RunResult } from "../agent/loop.js";
 import { closeDeal, type DealOutcome } from "../domain/dealClose.js";
 import { isToolError } from "../domain/errors.js";
 import { computeAggregateMetrics } from "../domain/metrics.js";
@@ -234,8 +234,8 @@ program
 /**
  * OpenAI's own x-ratelimit-* response headers, captured after every model
  * call (see RateLimitInfo in src/agent/loop.ts) -- real numbers from the API
- * itself, not an estimate. Printed after each lead so it's obvious how much
- * of the daily budget is left without needing a separate command.
+ * itself, not an estimate. Printed after each lead in `process`, and
+ * standalone via `quota` below.
  */
 function printRateLimitInfo(info: RunResult["rateLimitInfo"]): void {
   if (!info || (info.remainingRequests === undefined && info.limitRequests === undefined)) return;
@@ -246,6 +246,38 @@ function printRateLimitInfo(info: RunResult["rateLimitInfo"]): void {
   const line = `  Quota: ${remaining}/${limit} requests remaining${reset}`;
   console.log(low ? chalk.red(line) : chalk.dim(line));
 }
+
+program
+  .command("quota")
+  .description("Check remaining API quota with one minimal request -- no lead is touched, no tool calls, no DB writes")
+  .action(async () => {
+    let client: ReturnType<typeof getClient>;
+    try {
+      client = getClient();
+    } catch (e) {
+      console.log(chalk.red((e as Error).message));
+      return;
+    }
+
+    try {
+      const { response } = await client.chat.completions.create({
+        model: DEFAULT_MODEL,
+        messages: [{ role: "user", content: "Reply with the single word: pong" }],
+        max_completion_tokens: 64,
+      }).withResponse();
+      const info = extractRateLimitInfo(response.headers);
+      if (!info) {
+        console.log(chalk.dim("Call succeeded, but the API didn't return x-ratelimit-* headers this time."));
+        return;
+      }
+      printRateLimitInfo(info);
+    } catch (e) {
+      const info = extractRateLimitInfo((e as { headers?: unknown })?.headers);
+      if (info) printRateLimitInfo(info);
+      const message = e instanceof Error ? e.message : String(e);
+      console.log(chalk.red(`Quota check call itself failed: ${message}`));
+    }
+  });
 
 program
   .command("close <leadId> <outcome>")

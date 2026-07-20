@@ -23,6 +23,9 @@ see `src/cli/progress.ts` — followed by OpenAI's real remaining-requests count
 straight off the API's own rate-limit response headers. Add `--limit <n>` (e.g.
 `npm run cli -- process --limit 2`) to cap how many *new* leads that pass starts, so a casual
 `process` call against a small daily quota can't accidentally drain the whole queue in one shot.
+`npm run cli -- quota` checks the same real quota numbers standalone, without processing any lead —
+one minimal completion call (no tools, no DB writes), so checking how much budget is left doesn't
+itself cost more than the smallest possible request.
 `npm run cli -- close <leadId> <won|lost|canceled>` is the human action that records a
 closed deal (see "Why there's no `close_deal` tool" below).
 `npm run cli -- retry <leadId>` is the human action that un-parks a lead stuck on an escalation

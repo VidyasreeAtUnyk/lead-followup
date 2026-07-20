@@ -8,7 +8,7 @@ import { nowIso } from "../db/client.js";
 import type { RunOutcomeKind } from "../domain/types.js";
 
 const TERMINAL_TOOLS = new Set(["propose_message", "propose_viewing", "send_message", "escalate_to_agent"]);
-const DEFAULT_MODEL = process.env.OPENAI_MODEL ?? "gpt-5.4-mini";
+export const DEFAULT_MODEL = process.env.OPENAI_MODEL ?? "gpt-5.4-mini";
 const MAX_ASSISTANT_TURNS = 8;
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_BASE_DELAY_MS = 1000;
@@ -64,9 +64,9 @@ function getHeaderValue(headers: unknown, name: string): string | null {
  * successful responses (via .withResponse()) and thrown errors (the SDK
  * attaches .headers to those too). This is the actual source of truth for
  * "how much quota is left," not an estimate: surfaced to the user after
- * every run via RunResult.rateLimitInfo.
+ * every run via RunResult.rateLimitInfo, and standalone via `cli quota`.
  */
-function extractRateLimitInfo(headers: unknown): RateLimitInfo | undefined {
+export function extractRateLimitInfo(headers: unknown): RateLimitInfo | undefined {
   const limit = getHeaderValue(headers, "x-ratelimit-limit-requests");
   const remaining = getHeaderValue(headers, "x-ratelimit-remaining-requests");
   const reset = getHeaderValue(headers, "x-ratelimit-reset-requests");
@@ -141,7 +141,7 @@ export interface RunProgress {
 
 export type ProgressCallback = (progress: RunProgress) => void;
 
-function getClient(): OpenAI {
+export function getClient(): OpenAI {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error(
