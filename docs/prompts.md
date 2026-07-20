@@ -362,3 +362,25 @@ With that confidence, ran the actual graded suite: `npm run evals`, full 7 scena
 All 7 passed against the live model on the first clean attempt. This is the deliverable the eval
 requirement asks for -- scripted scenarios asserting real final DB state against a real LLM, not
 mocked responses -- and it passed end to end.
+
+## Entry 20 — `cli quota`: checking the budget without spending it on a lead
+
+Quota was only ever visible as a side effect of `cli process` -- which also runs real business logic
+(tool calls, DB writes) against whichever lead it touches. Added a standalone `quota` command that
+spends the minimum possible on purpose: one completion call, no tools, purely to read the real
+`x-ratelimit-*` response headers via the same `extractRateLimitInfo` used everywhere else (exported
+from `loop.ts` along with `getClient`/`DEFAULT_MODEL` rather than duplicated).
+
+Two real API quirks surfaced immediately by actually running it against a live key, not by reasoning
+about it in the abstract:
+1. First attempt used `max_tokens: 1` and got a `400`: `Unsupported parameter: 'max_tokens' is not
+   supported with this model. Use 'max_completion_tokens' instead.` -- worth noting the error path
+   still correctly recovered and printed the real quota numbers (25/50 remaining) even though the
+   call itself failed, which is exactly the fallback this command needed but hadn't been tested yet.
+2. Switched to `max_completion_tokens: 1` and hit a second `400`: `Could not finish the message
+   because max_tokens or model output limit was reached.` -- this model reserves part of its
+   completion-token budget for internal reasoning before any visible output, so `1` wasn't enough
+   even for a trivial reply. Bumped to `64` and it succeeded cleanly.
+
+Both fixes cost a real request each to discover -- an acceptable, small trade for shipping a command
+whose entire purpose is telling the truth about quota, verified rather than assumed to work.
