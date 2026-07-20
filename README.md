@@ -3,6 +3,38 @@
 An autonomous real estate lead follow-up agent with a human approval step in the loop.
 TypeScript, OpenAI function calling, SQLite (`node:sqlite`), Zod, plain CLI. No web UI.
 
+> **This branch (`experiment/gemini-provider`) is a side experiment, not the graded submission.**
+> The brief requires OpenAI function calling specifically; `main` stays exactly that. This branch
+> adds an alternate Gemini-backed implementation alongside it, proving the guardrails/loop design
+> is genuinely provider-agnostic (they live in the tools, not the model) -- see "Gemini experiment"
+> below.
+
+## Gemini experiment (this branch only)
+
+Set `MODEL_PROVIDER=gemini` and `GEMINI_API_KEY=...` in `.env` (see `.env.example`) and every CLI
+command that drives the agent (`process`, etc.) transparently uses `src/agent/loopGemini.ts`
+instead of the OpenAI path -- no other code changes needed, since `runAgentForLead`
+(`src/agent/loop.ts`) is the single entry point every caller (CLI, `runQueue`, evals, tests) already
+goes through. Leave `MODEL_PROVIDER` unset (or anything other than `gemini`) to use OpenAI as
+normal.
+
+This is a parallel implementation, not a shared abstraction: `loopGemini.ts` duplicates the
+turn-loop control flow rather than refactoring `loop.ts` into a generic provider interface, so the
+graded OpenAI path (`main`) carries zero risk from this experiment -- `loopGemini.ts` and
+`geminiTools.ts` could be deleted entirely with no effect on anything else. What IS genuinely
+shared, unchanged: `dispatchToolCall` (guardrails + audit logging), `buildSystemPrompt`/
+`buildUserTurn`, the `RunResult`/`RunOutcome`/`RunProgress` types, and `insertRunMetric` -- which is
+exactly the point: the guardrails and audit trail are model-agnostic by construction, and this
+branch is the proof.
+
+Verified live against a real Gemini key: the happy-path propose→approve→send flow (Alice) and the
+do-not-contact hard guardrail (Bob) both worked identically to the OpenAI path -- same tools, same
+enforcement, same audit trail shape, different model choosing the calls. One real Gemini-specific
+bug was found and fixed along the way: Gemini attaches an opaque `thoughtSignature` to
+function-call parts and rejects the next turn with a 400 if it isn't echoed back verbatim when
+re-sending conversation history -- fixed by pushing the model's own response parts back into
+history unmodified rather than reconstructing them from just the `functionCalls` getter.
+
 ## Quick start
 
 ```bash

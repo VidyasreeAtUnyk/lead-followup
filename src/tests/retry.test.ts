@@ -100,4 +100,35 @@ export const retryTests: Test[] = [
       );
     },
   },
+  {
+    name: "runAgentForLead: an explicitly-passed client always wins over MODEL_PROVIDER=gemini",
+    run: async () => {
+      // Regression test: on the experiment/gemini-provider branch, importing
+      // runQueue.ts (which loadEnvFile()s at module scope) anywhere in the
+      // test process picks up a developer's local .env. If that .env has
+      // MODEL_PROVIDER=gemini set (e.g. for manual testing), every test that
+      // injects a stub OpenAI client must still use it -- not silently
+      // redirect to a real Gemini call just because the env var is set.
+      const originalProvider = process.env.MODEL_PROVIDER;
+      process.env.MODEL_PROVIDER = "gemini";
+      try {
+        const db = createTestDb();
+        seedMinimalLead(db, 5);
+        const stubClient = makeThrowingClient(400, "simulated bad request -- should be used, not bypassed");
+        const start = Date.now();
+
+        const result = await runAgentForLead(db, 5, stubClient, { maxRetries: 3, baseDelayMs: 1000 });
+        const elapsedMs = Date.now() - start;
+
+        assertTrue(result.outcome.kind === "escalated", `expected escalated outcome, got ${result.outcome.kind}`);
+        assertTrue(
+          elapsedMs < 500,
+          `expected the explicit stub client to be used (fast, local) even with MODEL_PROVIDER=gemini set, took ${elapsedMs}ms`
+        );
+      } finally {
+        if (originalProvider === undefined) delete process.env.MODEL_PROVIDER;
+        else process.env.MODEL_PROVIDER = originalProvider;
+      }
+    },
+  },
 ];

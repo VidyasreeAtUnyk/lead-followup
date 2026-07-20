@@ -117,12 +117,39 @@ function getClient(): OpenAI {
  * committed to SQLite as it happens, so killing the process at any point and
  * calling this again for the same leadId resumes coherently: get_lead_context
  * will simply reflect whatever already went through.
+ *
+ * Public entry point used by every caller (CLI, runQueue, evals, tests).
+ * Delegates to the Gemini implementation (experiment branch only --
+ * src/agent/loopGemini.ts) when MODEL_PROVIDER=gemini, dynamically imported
+ * so the OpenAI path never needs @google/genai loaded or GEMINI_API_KEY set,
+ * and vice versa. Default behavior (no env var set) is unchanged: OpenAI,
+ * exactly as before.
+ *
+ * An explicitly-passed `client` always wins over MODEL_PROVIDER, regardless
+ * of what's in the environment: passing a client is a deliberate override
+ * signal (this is exactly how tests inject a stub), and honoring it
+ * unconditionally is what makes those tests deterministic no matter what a
+ * developer's local .env happens to have set for their own manual testing.
  */
 export async function runAgentForLead(
   db: DatabaseSync,
   leadId: number,
-  client: OpenAI = getClient(),
+  client?: OpenAI,
   retryOpts: RetryOptions = {},
+  onProgress?: ProgressCallback
+): Promise<RunResult> {
+  if (!client && process.env.MODEL_PROVIDER === "gemini") {
+    const { runAgentForLeadGemini } = await import("./loopGemini.js");
+    return runAgentForLeadGemini(db, leadId, retryOpts, onProgress);
+  }
+  return runAgentForLeadOpenAI(db, leadId, client ?? getClient(), retryOpts, onProgress);
+}
+
+async function runAgentForLeadOpenAI(
+  db: DatabaseSync,
+  leadId: number,
+  client: OpenAI,
+  retryOpts: RetryOptions,
   onProgress?: ProgressCallback
 ): Promise<RunResult> {
   const lead = getLead(db, leadId);

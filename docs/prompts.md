@@ -256,3 +256,52 @@ real inconsistency regardless of whether each piece is individually "correct." F
 `Status` column so `parked` and `transient` are still visually distinct within the list. Two
 commands sharing a name should share a definition, even when the narrower one seemed more useful
 in isolation.
+
+## Entry 17 — Gemini experiment branch
+
+Asked to try an alternate model provider to work around the OpenAI account's tight rate limit,
+first Anthropic then Gemini -- both paused on a real prerequisite question (does a usable API key
+with credits actually exist, separate from a Claude Pro subscription in Anthropic's case) before
+building anything. Gemini had a key ready. Kept this strictly off `main`: created
+`experiment/gemini-provider` since the brief requires OpenAI specifically, and treated this as a
+genuine side experiment, not a path toward replacing the graded implementation.
+
+Design choice: rather than refactoring `loop.ts` into a generic provider interface, wrote a fully
+parallel `loopGemini.ts` duplicating just the turn-loop control flow, while genuinely sharing
+`dispatchToolCall`, `buildSystemPrompt`/`buildUserTurn`, and the `RunResult`/`RunProgress` types
+unchanged. Reasoning: the guardrails living in the tools (not the model) is the whole point of this
+system's design, and reusing `dispatchToolCall` untouched is what actually proves that claim --
+duplicating the turn loop is a small, low-risk cost for keeping the OpenAI path (and the graded
+main branch) completely unaffected; `loopGemini.ts`/`geminiTools.ts` could be deleted with zero
+blast radius elsewhere. `runAgentForLead` itself became a two-line dispatcher checking
+`MODEL_PROVIDER`, dynamically importing the Gemini module only when needed.
+
+Two real bugs surfaced during live verification, not guessed at:
+1. Queried `models.list()` rather than guessing model names (the model I expected, `gemini-2.5-flash`,
+   returned "no longer available to new users" -- a real, live API response, not an assumption) and
+   found `gemini-flash-latest` works.
+2. Gemini rejected the *second* turn of a real multi-tool-call run with a 400 about a missing
+   `thought_signature` -- caught because I ran the actual happy-path flow end-to-end rather than
+   stopping at a single successful call. Root cause: `contents.push` was reconstructing model-turn
+   parts from just the `functionCalls` getter, dropping Gemini's per-part `thoughtSignature`. Fixed
+   by pushing `response.candidates[0].content.parts` back verbatim.
+
+A third bug was more subtle and required tracing symptoms rather than assuming: `npm run test`
+dropped from 22/22 to 18-19/22 after adding this branch's code, with wildly inconsistent multi-second
+timings on tests that should finish in milliseconds. Isolated repro (`runAgentForLead` alone) was
+instant -- the bug only reproduced inside the full suite. Bisected by re-running subsets of the test
+array until the exact trigger was found: `locking.test.ts` imports `runQueue.ts`, which calls
+`loadEnvFile()` at module scope, which loads this developer's local `.env` -- now containing
+`MODEL_PROVIDER=gemini` from manual testing -- into the whole test process. Every subsequent
+`runAgentForLead` call, even ones passing an explicit stub `OpenAI` client, silently redirected to
+the real Gemini implementation instead of using the stub, making "instant" tests make real network
+calls. Fixed at the right layer: an explicitly-passed `client` now always overrides `MODEL_PROVIDER`
+in `runAgentForLead`'s dispatcher, since passing a client is a deliberate override signal regardless
+of ambient environment state. Added a regression test that sets `MODEL_PROVIDER=gemini` directly and
+confirms an injected stub client still wins. Lesson: a test suite should never be sensitive to a
+developer's local `.env` contents, and "explicit argument beats implicit environment config" is a
+good default to enforce in code, not just avoid by discipline.
+
+Verified live end-to-end after the fixes: happy-path propose→approve→send (Alice) and the
+do-not-contact guardrail (Bob) both worked identically to the OpenAI path -- same tools, same
+enforcement, same audit trail shape. All 23 unit tests pass (22 prior + the new regression test).
