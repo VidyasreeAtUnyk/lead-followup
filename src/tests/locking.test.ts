@@ -26,6 +26,53 @@ function makeSlowClient(): OpenAI {
   } as unknown as OpenAI;
 }
 
+/**
+ * A stub client that resolves any lead in exactly one turn by escalating --
+ * reads the lead id out of buildUserTurn's own message text ("Process lead id
+ * N now...") since that's the only place the stub can see which lead this
+ * particular call is for.
+ */
+function makeQuickEscalatingClient(): OpenAI {
+  let callCounter = 0;
+  return {
+    chat: {
+      completions: {
+        create: (params: { messages: { role: string; content?: unknown }[] }) => ({
+          withResponse: async () => {
+            callCounter += 1;
+            const userMsg = params.messages.find((m) => m.role === "user")?.content as string | undefined;
+            const leadId = Number(userMsg?.match(/Process lead id (\d+)/)?.[1] ?? 0);
+            return {
+              data: {
+                choices: [
+                  {
+                    message: {
+                      role: "assistant",
+                      content: null,
+                      tool_calls: [
+                        {
+                          id: `call_${callCounter}`,
+                          type: "function",
+                          function: {
+                            name: "escalate_to_agent",
+                            arguments: JSON.stringify({ lead_id: leadId, reason: "quick test" }),
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+                usage: { total_tokens: 10 },
+              },
+              response: { headers: { get: () => null } },
+            };
+          },
+        }),
+      },
+    },
+  } as unknown as OpenAI;
+}
+
 export const lockingTests: Test[] = [
   {
     name: "tryAcquireLock: two workers racing for the same lead -- only one acquires it",
@@ -91,6 +138,25 @@ export const lockingTests: Test[] = [
 
       assertTrue(resultsB.length === 0, `expected worker-B to skip the locked lead, got ${resultsB.length} result(s)`);
       assertTrue(getLead(db, 1)!.locked_by === "worker-A", "lock should remain held by worker-A, untouched by worker-B's skip");
+    },
+  },
+  {
+    name: "processQueue: an optional limit caps how many new leads a single pass starts",
+    run: async () => {
+      const db = createTestDb();
+      seedMinimalLead(db, 1);
+      seedMinimalLead(db, 2);
+      seedMinimalLead(db, 3);
+
+      const stubClient = makeQuickEscalatingClient();
+      const results = await processQueue(db, stubClient, undefined, undefined, {}, 2);
+
+      assertTrue(results.length === 2, `expected exactly 2 leads processed with limit=2, got ${results.length}`);
+      const untouchedLead = getLead(db, 3)!;
+      assertTrue(
+        untouchedLead.stage === "new",
+        `expected the 3rd lead to be left untouched by the capped pass, got stage '${untouchedLead.stage}'`
+      );
     },
   },
 ];

@@ -20,7 +20,9 @@ npm run cli -- history 1    # full audit trail for lead 1
 `npm run cli -- process` (no id) drains the whole queue, one lead at a time, showing a live spinner
 (elapsed time, tokens so far) that's replaced by a permanent line each time a tool call resolves —
 see `src/cli/progress.ts` — followed by OpenAI's real remaining-requests count for that day, read
-straight off the API's own rate-limit response headers.
+straight off the API's own rate-limit response headers. Add `--limit <n>` (e.g.
+`npm run cli -- process --limit 2`) to cap how many *new* leads that pass starts, so a casual
+`process` call against a small daily quota can't accidentally drain the whole queue in one shot.
 `npm run cli -- close <leadId> <won|lost|canceled>` is the human action that records a
 closed deal (see "Why there's no `close_deal` tool" below).
 `npm run cli -- retry <leadId>` is the human action that un-parks a lead stuck on an escalation
@@ -34,6 +36,9 @@ Other scripts:
 ```bash
 npm run reset-db      # wipes data/leads.sqlite
 npm run evals         # runs the 7 scripted scenarios in src/evals/run.ts against a throwaway db
+npm run evals -- --quick  # runs only 4/7 (1, 2, 5, 6) -- one full propose->approve->send cycle plus
+                          # one scenario per distinct guardrail category -- for cheaper local iteration.
+                          # Run the full suite (no flag) before treating the eval requirement as done.
 npm run test          # deterministic unit tests (grounding parsing, retry/backoff, locking) -- no API key needed
 npm run demo:resume   # kills the agent process mid-run and shows it resumes correctly (see below)
 npm run cli -- metrics  # aggregate run stats: escalation rate, tool calls/run, estimated cost, approval turnaround

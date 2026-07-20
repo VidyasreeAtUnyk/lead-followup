@@ -297,3 +297,39 @@ implement the real `.withResponse()` chain, and added two new tests asserting ra
 captured correctly from both a successful and a failed call. Lesson: a test "passing" isn't the same
 as a test exercising the path it claims to -- worth periodically checking that a mocked dependency's
 shape hasn't drifted from what production code actually calls.
+
+## Entry 18 — Capping requests per pass, not just per run
+
+Asked two follow-ups after Entry 17: is there more to squeeze out of per-lead request count, and
+can the *number of leads touched per invocation* be capped so a casual `cli process` or `npm run
+evals` doesn't accidentally drain a whole day's quota.
+
+On the first: the per-run turn count (2-3, see Entry 17) is already close to the theoretical floor.
+Any tool call that depends on another tool's result (do_not_contact's escalate-or-not branch,
+propose_message needing get_property_market_data's grounded figures) can't be requested in the same
+turn as the call it depends on, since every tool call within one turn is issued from a single model
+decision before any of that turn's results come back -- there's no way to conditionally branch
+within a turn. So 2 turns (gather state, then act on it) is the floor for any lead needing a
+state-dependent decision, and main is already there for most cases; only the "property matched and
+needs market data" path can slip to 3 if the model doesn't take the prompt up on combining
+get_property_market_data with the terminal propose call.
+
+On the second, which was the more actionable one: `cli process` (no leadId) and `npm run evals` had
+no way to bound how much of the daily budget a single invocation could consume. `cli process` drains
+the *entire* queue (up to all 8 seeded leads, ~16-24 requests in one call) with no way to stop
+partway through short of Ctrl+C. Added an optional `limit` param to `processQueue`
+(`src/agent/runQueue.ts`) -- appended as a trailing optional argument rather than reordering existing
+positional params, so none of the three existing call sites needed to change -- applied only to the
+fresh-lead queue, not a resumed in-progress lead (that one was already committed to before this call
+started). Wired up as `cli process --limit <n>`. Added a regression test
+(`locking.test.ts`) seeding 3 leads with limit=2 and asserting the 3rd is left untouched.
+
+`npm run evals` runs 9 total `runAgentForLead` calls across its 7 scenarios (scenario 1: 2, scenario
+3: 3, the rest: 0-1 each) -- roughly 20-25 requests for a full run, which alone can eat half a
+50-request daily cap. Added `--quick`, an opt-in flag (default behavior unchanged, so the full suite
+still runs when it matters for grading) that filters to scenarios 1, 2, 5, and 6: one complete
+propose->approve->send cycle plus one scenario from each distinct guardrail category (hard
+prohibition, state-machine transition, evidence-gated reactivation) -- 4 runs instead of 9, skipping
+scenario 3 (rejection/revise, which re-exercises the same propose path scenario 1 already covers,
+just twice more) and scenarios 4/7 (additional escalation/grounding variants of coverage scenario 2
+and 1 already provide, not new guardrail categories).

@@ -197,8 +197,10 @@ program
 program
   .command("process [leadId]")
   .description("Run the agent loop over the queue (or a single lead id) -- requires OPENAI_API_KEY")
-  .action(async (leadIdArg?: string) => {
+  .option("-n, --limit <count>", "process at most this many leads this pass (guards against draining a whole day's quota in one run)")
+  .action(async (leadIdArg: string | undefined, opts: { limit?: string }) => {
     const only = leadIdArg ? Number(leadIdArg) : undefined;
+    const limit = opts.limit ? Number(opts.limit) : undefined;
     const database = db();
 
     let renderer: RunProgressRenderer | null = null;
@@ -222,7 +224,7 @@ program
         activeLeadId = null;
         printRateLimitInfo(result.rateLimitInfo);
       },
-    });
+    }, limit);
 
     if (results.length === 0) {
       console.log(chalk.dim("Queue is empty -- nothing to process."));

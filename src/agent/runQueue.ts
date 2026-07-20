@@ -37,7 +37,8 @@ export async function processQueue(
   client?: OpenAI,
   only?: number,
   workerId: string = defaultWorkerId(),
-  hooks: ProcessQueueHooks = {}
+  hooks: ProcessQueueHooks = {},
+  limit?: number
 ): Promise<RunResult[]> {
   const results: RunResult[] = [];
 
@@ -56,7 +57,11 @@ export async function processQueue(
     }
   }
 
-  const queue = only !== undefined ? getQueue(db).filter((l) => l.id === only) : getQueue(db);
+  const fullQueue = only !== undefined ? getQueue(db).filter((l) => l.id === only) : getQueue(db);
+  // limit caps how many *new* leads this pass starts -- it doesn't count a
+  // resumed in-progress lead above, since that one was already committed to
+  // before this call and isn't a fresh request-budget decision.
+  const queue = limit !== undefined ? fullQueue.slice(0, limit) : fullQueue;
 
   for (const lead of queue) {
     if (results.some((r) => r.leadId === lead.id)) continue;
