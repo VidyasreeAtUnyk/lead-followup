@@ -32,6 +32,23 @@ function db() {
   return getDb(DEFAULT_DB_PATH);
 }
 
+/**
+ * Validates a CLI numeric argument instead of letting Number()'s NaN
+ * silently propagate -- an invalid id flowing into a DB lookup or a queue
+ * filter reads as a legitimate "not found"/"empty" result rather than the
+ * actual problem (a typo or bad input), which is actively misleading rather
+ * than just unpolished. Returns null (having already printed the error) if
+ * invalid, so every call site can just `if (x === null) return;`.
+ */
+function parsePositiveInt(raw: string, label: string): number | null {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    console.log(chalk.red(`Invalid ${label}: '${raw}'. Expected a positive integer.`));
+    return null;
+  }
+  return n;
+}
+
 program
   .command("dashboard")
   .description("Show all leads with segment, stage, last contact, pending proposals, and escalation status")
@@ -121,7 +138,8 @@ program
   .command("history <leadId>")
   .description("Print the full chronological audit trail for a lead")
   .action((leadIdArg: string) => {
-    const leadId = Number(leadIdArg);
+    const leadId = parsePositiveInt(leadIdArg, "lead id");
+    if (leadId === null) return;
     const database = db();
     const lead = getLead(database, leadId);
     if (!lead) {
@@ -146,7 +164,8 @@ program
   .command("approve <proposalId>")
   .description("Approve a pending proposal")
   .action((proposalIdArg: string) => {
-    const proposalId = Number(proposalIdArg);
+    const proposalId = parsePositiveInt(proposalIdArg, "proposal id");
+    if (proposalId === null) return;
     const database = db();
     const proposal = getProposal(database, proposalId);
     if (!proposal) {
@@ -172,7 +191,8 @@ program
   .command("reject <proposalId> <reason>")
   .description("Reject a pending proposal with a reason")
   .action((proposalIdArg: string, reason: string) => {
-    const proposalId = Number(proposalIdArg);
+    const proposalId = parsePositiveInt(proposalIdArg, "proposal id");
+    if (proposalId === null) return;
     const database = db();
     const proposal = getProposal(database, proposalId);
     if (!proposal) {
@@ -199,8 +219,10 @@ program
   .description("Run the agent loop over the queue (or a single lead id) -- requires OPENAI_API_KEY")
   .option("-n, --limit <count>", "process at most this many leads this pass (guards against draining a whole day's quota in one run)")
   .action(async (leadIdArg: string | undefined, opts: { limit?: string }) => {
-    const only = leadIdArg ? Number(leadIdArg) : undefined;
-    const limit = opts.limit ? Number(opts.limit) : undefined;
+    const only = leadIdArg !== undefined ? parsePositiveInt(leadIdArg, "lead id") : undefined;
+    if (only === null) return;
+    const limit = opts.limit !== undefined ? parsePositiveInt(opts.limit, "limit") : undefined;
+    if (limit === null) return;
     const database = db();
 
     let renderer: RunProgressRenderer | null = null;
@@ -304,7 +326,8 @@ program
   .command("close <leadId> <outcome>")
   .description("Human action: record a deal outcome (won|lost|canceled) for a lead in decision_pending")
   .action((leadIdArg: string, outcomeArg: string) => {
-    const leadId = Number(leadIdArg);
+    const leadId = parsePositiveInt(leadIdArg, "lead id");
+    if (leadId === null) return;
     const outcome = outcomeArg as DealOutcome;
     if (!["won", "lost", "canceled"].includes(outcome)) {
       console.log(chalk.red("Outcome must be one of: won, lost, canceled"));
@@ -327,7 +350,8 @@ program
   .command("retry <leadId>")
   .description("Human action: clear a lead's escalation park so the agent will process it again")
   .action((leadIdArg: string) => {
-    const leadId = Number(leadIdArg);
+    const leadId = parsePositiveInt(leadIdArg, "lead id");
+    if (leadId === null) return;
     const database = db();
     const lead = getLead(database, leadId);
     if (!lead) {

@@ -450,3 +450,37 @@ where they're enforced); `loop.ts` imports its five operational constants and re
 `LOCK_TIMEOUT_MS`. Verified nothing was left duplicated with a repo-wide grep for each constant name
 outside the new file. `tsc --noEmit` clean, 26/26 unit tests still pass unchanged -- this was a pure
 reorganization, no behavior changed anywhere.
+
+## Entry 24 — A pre-submission self-review pass
+
+Asked directly whether this reflected everything a senior engineer would check, not just whether it
+met the brief's checklist. Rather than answering that in the abstract, checked concretely and found
+two real gaps.
+
+**Invalid CLI input was silently swallowed rather than rejected.** Every command parsing a numeric
+id used a bare `Number(arg)` with no validation -- `history abc` printed the harmless-but-meaningless
+"No lead with id NaN," but `cli process abc` printed **"Queue is empty -- nothing to process"**,
+which is actively misleading: the queue wasn't empty, a typo silently became a no-op that looks like
+a legitimate empty state. Root cause: `NaN` flowed unchecked into `getLead`/`getQueue`'s filter,
+where `NaN !== NaN` for any comparison, so a bad id just produced empty results indistinguishable
+from a genuinely empty queue. Fixed with one shared `parsePositiveInt(raw, label)` helper
+(`src/cli/index.ts`) used across all six numeric-arg sites (`history`, `approve`, `reject`,
+`process` id and `--limit`, `close`, `retry`) -- fails loud with `Invalid <label>: '<raw>'` instead
+of silently propagating. Verified live against `history abc`, `process abc`, and
+`process --limit xyz` before and after.
+
+**Prompt injection via untrusted lead-submitted text was never considered or documented.**
+`get_lead_context` feeds `interactions.detail`/`contact` -- real third-party content -- straight
+into the model's context, and nothing filters it. Didn't add a prompt-level defense (there isn't a
+reliable one), but named the actual mitigation explicitly in the README: every consequential action
+is gated by code the model can't argue its way past regardless of what an injected instruction told
+it to do, so an injection can change what the model *tries*, not what the tools *allow*. Flagged
+honestly as "the existing guardrails happen to cover this by design," not "this was specifically
+stress-tested" -- it wasn't, and claiming otherwise would be dishonest.
+
+Skipped, by choice, not oversight: a CI pipeline (GitHub Actions running `test`/`typecheck` on
+push). Genuinely optional for a take-home submission being reviewed by cloning the repo directly,
+and adding it now would be scope for its own sake rather than fixing something broken.
+
+`tsc --noEmit` clean, 26/26 unit tests pass unchanged (this touched CLI presentation logic and docs
+only, no domain/tool/loop behavior).
